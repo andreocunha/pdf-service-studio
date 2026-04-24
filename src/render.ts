@@ -78,8 +78,15 @@ export const renderDocumentPdf = async (args: {
       logger.warn({ err: message, documentId: args.documentId }, 'Render page error');
     });
     page.on('console', (msg) => {
+      const text = msg.text();
       if (msg.type() === 'error') {
-        logger.debug({ text: msg.text(), documentId: args.documentId }, 'Render console error');
+        logger.warn({ text, documentId: args.documentId }, 'Render console error');
+        return;
+      }
+      // Encaminha logs do client com prefixo [pdf-render] — úteis pra debug
+      // em produção sem precisar abrir devtools remoto.
+      if (text.startsWith('[pdf-render]')) {
+        logger.info({ text, documentId: args.documentId }, 'Render client log');
       }
     });
 
