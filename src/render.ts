@@ -23,7 +23,15 @@ const PX_TO_IN = 1 / 96;
  * terminou de montar e as fontes carregaram. Expõe também `window.__PDF_META`
  * com as dimensões reais da página do documento.
  */
-const waitForReady = async (page: Page, timeoutMs: number): Promise<RenderMeta> => {
+export type UsedFont = {
+  family: string;
+  category: 'sans' | 'serif' | 'mono' | null;
+};
+
+const waitForReady = async (
+  page: Page,
+  timeoutMs: number,
+): Promise<{ meta: RenderMeta; fonts: UsedFont[] }> => {
   await page.waitForFunction(
     () =>
       (window as unknown as { __PDF_READY?: boolean }).__PDF_READY === true &&
@@ -36,16 +44,17 @@ const waitForReady = async (page: Page, timeoutMs: number): Promise<RenderMeta> 
       await (document as Document & { fonts: FontFaceSet }).fonts.ready;
     }
   });
-  const meta = await page.evaluate(
-    () => (window as unknown as { __PDF_META: RenderMeta }).__PDF_META,
-  );
-  return meta;
+  const { meta, fonts } = await page.evaluate(() => {
+    const w = window as unknown as { __PDF_META: RenderMeta; __PDF_FONTS?: UsedFont[] };
+    return { meta: w.__PDF_META, fonts: Array.isArray(w.__PDF_FONTS) ? w.__PDF_FONTS : [] };
+  });
+  return { meta, fonts };
 };
 
 export const renderDocumentPdf = async (args: {
   documentId: string;
   workspaceId: string;
-}): Promise<{ buffer: Buffer; title: string }> => {
+}): Promise<{ buffer: Buffer; title: string; fonts: UsedFont[] }> => {
   const start = Date.now();
   const token = signRenderToken(args.documentId, args.workspaceId);
   const url = `${config.renderBaseUrl}/render-pdf/${encodeURIComponent(args.documentId)}?t=${encodeURIComponent(token)}`;
@@ -99,7 +108,7 @@ export const renderDocumentPdf = async (args: {
       throw renderFailed(`Render page responded with status ${status}`);
     }
 
-    const meta = await waitForReady(page, config.requestTimeoutMs);
+    const { meta, fonts } = await waitForReady(page, config.requestTimeoutMs);
 
     // Ajusta a viewport pra bater exatamente com a largura da página.
     // Isso garante que `mx-auto` não cause offset horizontal e que cada
@@ -127,13 +136,14 @@ export const renderDocumentPdf = async (args: {
 
     const elapsed = Date.now() - start;
     logger.info(
-      { documentId: args.documentId, elapsedMs: elapsed, pdfBytes: pdf.length },
+      { documentId: args.documentId, elapsedMs: elapsed, pdfBytes: pdf.length, fonts },
       'PDF rendered',
     );
 
     return {
       buffer: Buffer.from(pdf),
       title: meta.title ?? 'document',
+      fonts,
     };
   } finally {
     await page.close().catch(() => undefined);

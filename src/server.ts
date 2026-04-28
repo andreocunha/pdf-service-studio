@@ -5,6 +5,7 @@ import Fastify from 'fastify';
 import { authorize } from './auth.js';
 import { closeBrowser, warmUpBrowser } from './browser.js';
 import { config } from './config.js';
+import { convertPdfToDocx, startIlovepdfTask } from './convert-ilovepdf.js';
 import { HttpError } from './errors.js';
 import { logger } from './logger.js';
 import { renderDocumentPdf } from './render.js';
@@ -47,6 +48,24 @@ app.get('/health', async () => ({ ok: true, version: '0.1.0' }));
 
 type PdfBody = { documentId?: unknown };
 
+// Sanitiza só caracteres reservados de filesystem (preserva acentos, parênteses, etc).
+const cleanTitle = (raw: string | undefined): string => {
+  return (
+    (raw || 'documento')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[/\\:*?"<>|\x00-\x1F]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim() || 'documento'
+  );
+};
+
+const dispositionFor = (clean: string, ext: 'pdf' | 'docx'): string => {
+  // ASCII fallback pra clientes que não entendem RFC 5987 (é raro hoje, mas seguro).
+  const asciiFallback = clean.replace(/[^\x20-\x7E]/g, '_');
+  const encodedUtf8 = encodeURIComponent(clean);
+  return `attachment; filename="${asciiFallback}.${ext}"; filename*=UTF-8''${encodedUtf8}.${ext}`;
+};
+
 app.post<{ Body: PdfBody }>('/pdf', async (req, reply) => {
   const { documentId } = req.body ?? {};
   if (typeof documentId !== 'string' || documentId.length < 8) {
@@ -68,25 +87,48 @@ app.post<{ Body: PdfBody }>('/pdf', async (req, reply) => {
     workspaceId: authed.workspaceId,
   });
 
-  // Sanitiza só caracteres reservados de filesystem (preserva acentos, parênteses, etc).
-  const clean = (title || 'documento')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[/\\:*?"<>|\x00-\x1F]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim() || 'documento';
-  // ASCII fallback pra clientes que não entendem RFC 5987 (é raro hoje, mas seguro).
-  const asciiFallback = clean.replace(/[^\x20-\x7E]/g, '_');
-  const encodedUtf8 = encodeURIComponent(clean);
-
+  const clean = cleanTitle(title);
   reply
     .code(200)
     .header('Content-Type', 'application/pdf')
-    .header(
-      'Content-Disposition',
-      `attachment; filename="${asciiFallback}.pdf"; filename*=UTF-8''${encodedUtf8}.pdf`,
-    )
+    .header('Content-Disposition', dispositionFor(clean, 'pdf'))
     .header('Cache-Control', 'no-store')
     .send(buffer);
+});
+
+app.post<{ Body: PdfBody }>('/docx', async (req, reply) => {
+  const { documentId } = req.body ?? {};
+  if (typeof documentId !== 'string' || documentId.length < 8) {
+    reply.code(400).send({ error: 'bad_request', message: 'documentId is required' });
+    return;
+  }
+  const authorization = req.headers['authorization'];
+  const apiKeyHeader = req.headers['x-api-key'];
+  const apiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
+
+  const authed = await authorize({
+    documentId,
+    authorization: typeof authorization === 'string' ? authorization : undefined,
+    apiKey: typeof apiKey === 'string' ? apiKey : undefined,
+  });
+
+  // Start the ilovepdf task concurrently with PDF rendering to save ~800ms.
+  const [{ buffer: pdfBuffer, title }, ilovepdfTask] = await Promise.all([
+    renderDocumentPdf({ documentId: authed.documentId, workspaceId: authed.workspaceId }),
+    startIlovepdfTask(),
+  ]);
+  const clean = cleanTitle(title);
+  const docxBuffer = await convertPdfToDocx(pdfBuffer, authed.documentId, clean, ilovepdfTask);
+
+  reply
+    .code(200)
+    .header(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    )
+    .header('Content-Disposition', dispositionFor(clean, 'docx'))
+    .header('Cache-Control', 'no-store')
+    .send(docxBuffer);
 });
 
 const start = async (): Promise<void> => {
