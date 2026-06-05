@@ -5,7 +5,8 @@ import Fastify from 'fastify';
 import { authorize } from './auth.js';
 import { closeBrowser, warmUpBrowser } from './browser.js';
 import { config } from './config.js';
-import { convertPdfToDocx, startIlovepdfTask } from './convert-ilovepdf.js';
+import { convertPdfToOffice, startIlovepdfTask } from './convert-ilovepdf.js';
+import type { OfficeFormat } from './convert-ilovepdf.js';
 import { HttpError } from './errors.js';
 import { logger } from './logger.js';
 import { renderDocumentPdf } from './render.js';
@@ -59,7 +60,7 @@ const cleanTitle = (raw: string | undefined): string => {
   );
 };
 
-const dispositionFor = (clean: string, ext: 'pdf' | 'docx'): string => {
+const dispositionFor = (clean: string, ext: 'pdf' | 'docx' | 'pptx'): string => {
   // ASCII fallback pra clientes que não entendem RFC 5987 (é raro hoje, mas seguro).
   const asciiFallback = clean.replace(/[^\x20-\x7E]/g, '_');
   const encodedUtf8 = encodeURIComponent(clean);
@@ -96,7 +97,17 @@ app.post<{ Body: PdfBody }>('/pdf', async (req, reply) => {
     .send(buffer);
 });
 
-app.post<{ Body: PdfBody }>('/docx', async (req, reply) => {
+// docx (Word) e pptx (PowerPoint) compartilham o mesmo fluxo via ilovepdf/pdfoffice.
+const OFFICE_CONTENT_TYPE: Record<OfficeFormat, string> = {
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+};
+
+const handleOfficeExport = async (
+  format: OfficeFormat,
+  req: import('fastify').FastifyRequest<{ Body: PdfBody }>,
+  reply: import('fastify').FastifyReply,
+): Promise<void> => {
   const { documentId } = req.body ?? {};
   if (typeof documentId !== 'string' || documentId.length < 8) {
     reply.code(400).send({ error: 'bad_request', message: 'documentId is required' });
@@ -118,18 +129,18 @@ app.post<{ Body: PdfBody }>('/docx', async (req, reply) => {
     startIlovepdfTask(),
   ]);
   const clean = cleanTitle(title);
-  const docxBuffer = await convertPdfToDocx(pdfBuffer, authed.documentId, clean, ilovepdfTask);
+  const officeBuffer = await convertPdfToOffice(pdfBuffer, authed.documentId, clean, format, ilovepdfTask);
 
   reply
     .code(200)
-    .header(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    )
-    .header('Content-Disposition', dispositionFor(clean, 'docx'))
+    .header('Content-Type', OFFICE_CONTENT_TYPE[format])
+    .header('Content-Disposition', dispositionFor(clean, format))
     .header('Cache-Control', 'no-store')
-    .send(docxBuffer);
-});
+    .send(officeBuffer);
+};
+
+app.post<{ Body: PdfBody }>('/docx', (req, reply) => handleOfficeExport('docx', req, reply));
+app.post<{ Body: PdfBody }>('/pptx', (req, reply) => handleOfficeExport('pptx', req, reply));
 
 const start = async (): Promise<void> => {
   try {

@@ -23,6 +23,9 @@ type TaskStatus = { status: string; download_filename?: string; tool?: string };
 
 const ts = () => Date.now();
 
+// pdfoffice converte para docx (Word) ou pptx (PowerPoint) — mesmo fluxo, só muda convert_to.
+export type OfficeFormat = 'docx' | 'pptx';
+
 export type IlovepdfTask = { workerServer: string; taskId: string };
 
 export const startIlovepdfTask = async (): Promise<IlovepdfTask> => startTask();
@@ -81,12 +84,13 @@ const processTask = async (
   serverFilename: string,
   filename: string,
   outputFilename: string,
+  convertTo: OfficeFormat,
 ): Promise<void> => {
   const t0 = ts();
   const form = new FormData();
   form.append('task', taskId);
   form.append('tool', TOOL);
-  form.append('convert_to', 'docx');
+  form.append('convert_to', convertTo);
   form.append('output_filename', outputFilename);
   form.append('packaged_filename', 'ilovepdf_converted');
   form.append('ocr', '0');
@@ -126,7 +130,7 @@ const processTask = async (
   throw new Error('ilovepdf task timed out');
 };
 
-const downloadDocx = async (workerServer: string, taskId: string): Promise<Buffer> => {
+const downloadOffice = async (workerServer: string, taskId: string): Promise<Buffer> => {
   const t0 = ts();
   const downloadHeaders = { ...BASE_HEADERS, Accept: '*/*' };
   const res = await fetch(`${workerServer}/${API_VERSION}/download/${taskId}`, {
@@ -142,10 +146,11 @@ const downloadDocx = async (workerServer: string, taskId: string): Promise<Buffe
   return Buffer.from(arrayBuffer);
 };
 
-export const convertPdfToDocx = async (
+export const convertPdfToOffice = async (
   pdfBuffer: Buffer,
   documentId: string,
   title: string,
+  format: OfficeFormat,
   preCreatedTask?: IlovepdfTask,
 ): Promise<Buffer> => {
   const globalStart = ts();
@@ -157,16 +162,16 @@ export const convertPdfToDocx = async (
       // Re-create the task on retry — lands on a different (hopefully healthy) server.
       const { workerServer, taskId } =
         attempt === 1 && preCreatedTask ? preCreatedTask : await startTask();
-      logger.info({ documentId, workerServer, attempt }, 'ilovepdf task started');
+      logger.info({ documentId, workerServer, attempt, format }, 'ilovepdf task started');
 
       const serverFilename = await uploadPdf(workerServer, taskId, pdfBuffer, filename);
-      await processTask(workerServer, taskId, serverFilename, filename, outputFilename);
-      const docxBuffer = await downloadDocx(workerServer, taskId);
+      await processTask(workerServer, taskId, serverFilename, filename, outputFilename, format);
+      const officeBuffer = await downloadOffice(workerServer, taskId);
 
-      logger.info({ documentId, elapsedMs: ts() - globalStart, bytes: docxBuffer.length }, 'ilovepdf DOCX ready');
-      return docxBuffer;
+      logger.info({ documentId, elapsedMs: ts() - globalStart, bytes: officeBuffer.length, format }, 'ilovepdf office ready');
+      return officeBuffer;
     } catch (err) {
-      logger.warn({ documentId, attempt, err }, 'ilovepdf: attempt failed');
+      logger.warn({ documentId, attempt, format, err }, 'ilovepdf: attempt failed');
       if (attempt < 2) continue;
       throw err;
     }
