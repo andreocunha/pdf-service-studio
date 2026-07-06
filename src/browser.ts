@@ -1,12 +1,14 @@
 import type { Browser } from 'puppeteer-core';
 import puppeteer from 'puppeteer-core';
+import chromium from '@sparticuz/chromium';
 
 import { config } from './config.js';
 import { logger } from './logger.js';
 
 let browserPromise: Promise<Browser> | null = null;
 
-const launchArgs = [
+// Usado só em dev local, com CHROMIUM_EXECUTABLE_PATH apontando pro Chrome do sistema.
+const LOCAL_LAUNCH_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage',
@@ -20,22 +22,31 @@ const launchArgs = [
   '--disable-renderer-backgrounding',
 ];
 
-const resolveExecutablePath = (): string => {
+type LaunchConfig = { executablePath: string; headless: true | 'shell'; args: string[] };
+
+const resolveLaunchConfig = async (): Promise<LaunchConfig> => {
   if (config.chromiumExecutablePath) {
-    return config.chromiumExecutablePath;
+    return { executablePath: config.chromiumExecutablePath, headless: true, args: LOCAL_LAUNCH_ARGS };
   }
-  throw new Error(
-    'CHROMIUM_EXECUTABLE_PATH is not set. In Docker, this is baked in (/usr/bin/chromium). In dev local, configure it in .env.local.',
-  );
+  // @sparticuz/chromium roda em sandboxes restritos (ex.: gVisor) sem crashar — o Chromium
+  // do apt trava com SIGTRAP ao fazer qualquer request de rede nesse tipo de ambiente.
+  return {
+    executablePath: await chromium.executablePath(),
+    headless: 'shell',
+    // Filtra --font-render-hinting=none: o default deles muda a renderização de texto do PDF.
+    args: puppeteer
+      .defaultArgs({ args: chromium.args, headless: 'shell' })
+      .filter((arg) => arg !== '--font-render-hinting=none'),
+  };
 };
 
 const launch = async (): Promise<Browser> => {
-  const executablePath = resolveExecutablePath();
+  const { executablePath, headless, args } = await resolveLaunchConfig();
   logger.info({ executablePath }, 'Launching Chromium');
   const browser = await puppeteer.launch({
     executablePath,
-    headless: true,
-    args: launchArgs,
+    headless,
+    args,
     defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 1 },
   });
   browser.on('disconnected', () => {

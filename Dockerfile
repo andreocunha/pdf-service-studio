@@ -15,11 +15,13 @@ RUN npm run build
 
 FROM node:20-bookworm-slim AS runtime
 
-# Chromium + fontes base do sistema + libs necessárias pro headless.
+# Chromium vem do pacote @sparticuz/chromium (bundled no node_modules) — não do apt.
+# O binário do apt trava com SIGTRAP em sandboxes restritos tipo gVisor (usado por
+# algumas plataformas de hosting) ao fazer qualquer request de rede.
+# Fontes base do sistema + libs necessárias pro headless seguem via apt.
 # Fontes custom do projeto são servidas pelo app Next.js via /api/fonts,
 # carregadas em tempo de render como @font-face dos arquivos .woff2.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      chromium \
       ca-certificates \
       fonts-liberation \
       fonts-noto-core \
@@ -44,8 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV NODE_ENV=production \
     PORT=8080 \
-    CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium \
-    # Puppeteer já baixaria um Chrome no install — evita.
+    # Puppeteer já baixaria um Chrome no install — evita (usamos @sparticuz/chromium).
     PUPPETEER_SKIP_DOWNLOAD=true
 
 WORKDIR /app
