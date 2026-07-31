@@ -5,11 +5,12 @@ import Fastify from 'fastify';
 import { authorize } from './auth.js';
 import { closeBrowser, warmUpBrowser } from './browser.js';
 import { config } from './config.js';
-import { convertPdfToOffice, startIlovepdfTask } from './convert-ilovepdf.js';
-import type { OfficeFormat } from './convert-ilovepdf.js';
+import { compressPdf, convertPdfToOffice, startIlovepdfTask } from './ilovepdf.js';
+import type { IlovepdfTask, OfficeFormat } from './ilovepdf.js';
 import { HttpError } from './errors.js';
 import { logger } from './logger.js';
 import { renderDocumentPdf } from './render.js';
+import { serviceClient } from './supabase.js';
 
 const app = Fastify({
   loggerInstance: logger,
@@ -67,6 +68,46 @@ const dispositionFor = (clean: string, ext: 'pdf' | 'docx' | 'pptx'): string => 
   return `attachment; filename="${asciiFallback}.${ext}"; filename*=UTF-8''${encodedUtf8}.${ext}`;
 };
 
+/**
+ * Comprime o PDF, mas NUNCA piora e NUNCA quebra o download: se o ilovepdf
+ * falhar, expirar, ou devolver um arquivo maior/vazio, entrega o original.
+ * (Compressão que aumenta o arquivo é real — acontece em PDF só-texto, onde
+ * não há imagem pra reamostrar e o reencode adiciona overhead.)
+ */
+const compressOrOriginal = async (
+  pdf: Buffer,
+  documentId: string,
+  title: string,
+  preCreatedTask?: IlovepdfTask,
+): Promise<Buffer> => {
+  const t0 = Date.now();
+  try {
+    const compressed = await compressPdf(pdf, documentId, title, preCreatedTask);
+    const elapsedMs = Date.now() - t0;
+    if (compressed.length === 0 || compressed.length >= pdf.length) {
+      logger.info(
+        { documentId, elapsedMs, originalBytes: pdf.length, compressedBytes: compressed.length },
+        'PDF compression not worth it — sending original',
+      );
+      return pdf;
+    }
+    logger.info(
+      {
+        documentId,
+        elapsedMs,
+        originalBytes: pdf.length,
+        compressedBytes: compressed.length,
+        savedPct: Math.round((1 - compressed.length / pdf.length) * 100),
+      },
+      'PDF compressed',
+    );
+    return compressed;
+  } catch (err) {
+    logger.warn({ documentId, elapsedMs: Date.now() - t0, err }, 'PDF compression failed — sending original');
+    return pdf;
+  }
+};
+
 app.post<{ Body: PdfBody }>('/pdf', async (req, reply) => {
   const { documentId } = req.body ?? {};
   if (typeof documentId !== 'string' || documentId.length < 8) {
@@ -83,18 +124,22 @@ app.post<{ Body: PdfBody }>('/pdf', async (req, reply) => {
     apiKey: typeof apiKey === 'string' ? apiKey : undefined,
   });
 
-  const { buffer, title } = await renderDocumentPdf({
-    documentId: authed.documentId,
-    workspaceId: authed.workspaceId,
-  });
+  // Abre a task de compressão em paralelo com o render — o start do ilovepdf
+  // custa ~800ms e não depende do PDF. Se falhar, o compress cria a dele.
+  const [{ buffer, title }, compressTask] = await Promise.all([
+    renderDocumentPdf({ documentId: authed.documentId, workspaceId: authed.workspaceId }),
+    startIlovepdfTask('compress').catch(() => undefined),
+  ]);
 
   const clean = cleanTitle(title);
+  const delivered = await compressOrOriginal(buffer, authed.documentId, clean, compressTask);
+
   reply
     .code(200)
     .header('Content-Type', 'application/pdf')
     .header('Content-Disposition', dispositionFor(clean, 'pdf'))
     .header('Cache-Control', 'no-store')
-    .send(buffer);
+    .send(delivered);
 });
 
 // docx (Word) e pptx (PowerPoint) compartilham o mesmo fluxo via ilovepdf/pdfoffice.
@@ -126,7 +171,7 @@ const handleOfficeExport = async (
   // Start the ilovepdf task concurrently with PDF rendering to save ~800ms.
   const [{ buffer: pdfBuffer, title }, ilovepdfTask] = await Promise.all([
     renderDocumentPdf({ documentId: authed.documentId, workspaceId: authed.workspaceId }),
-    startIlovepdfTask(),
+    startIlovepdfTask('pdfoffice'),
   ]);
   const clean = cleanTitle(title);
   const officeBuffer = await convertPdfToOffice(pdfBuffer, authed.documentId, clean, format, ilovepdfTask);
@@ -141,6 +186,97 @@ const handleOfficeExport = async (
 
 app.post<{ Body: PdfBody }>('/docx', (req, reply) => handleOfficeExport('docx', req, reply));
 app.post<{ Body: PdfBody }>('/pptx', (req, reply) => handleOfficeExport('pptx', req, reply));
+
+// ---------------------------------------------------------------------------
+// /compress-attachment — comprime um PDF que o chat da IA já subiu no bucket
+// ---------------------------------------------------------------------------
+// Motivação: PDF até 16 MB vai NATIVO pro modelo (ele VÊ o layout das páginas);
+// acima disso a rota de chat cai pra extração de texto e o resultado piora
+// muito em deck exportado do Canva. Comprimir traz o arquivo de volta pra
+// dentro da faixa nativa.
+//
+// O arquivo trafega service ↔ Supabase (o body aqui é só JSON), então o
+// bodyLimit de 1 MB do Fastify não atrapalha nem em anexo de 50 MB.
+//
+// O client é quem apaga o original depois de trocar a referência — assim uma
+// resposta perdida nunca deixa o chat apontando pra um arquivo que já sumiu.
+// ---------------------------------------------------------------------------
+
+const SOURCES_BUCKET = 'ai-design-sources';
+
+type CompressAttachmentBody = { documentId?: unknown; path?: unknown };
+
+app.post<{ Body: CompressAttachmentBody }>('/compress-attachment', async (req, reply) => {
+  const { documentId, path } = req.body ?? {};
+  if (typeof documentId !== 'string' || documentId.length < 8) {
+    reply.code(400).send({ error: 'bad_request', message: 'documentId is required' });
+    return;
+  }
+  if (typeof path !== 'string' || !path.endsWith('.pdf') || path.includes('..')) {
+    reply.code(400).send({ error: 'bad_request', message: 'path must be a .pdf inside the bucket' });
+    return;
+  }
+  const authorization = req.headers['authorization'];
+  const apiKeyHeader = req.headers['x-api-key'];
+  const apiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
+
+  const authed = await authorize({
+    documentId,
+    authorization: typeof authorization === 'string' ? authorization : undefined,
+    apiKey: typeof apiKey === 'string' ? apiKey : undefined,
+  });
+
+  // O download abaixo usa a SECRET_KEY (bypassa RLS), então a checagem de
+  // workspace tem que ser explícita: o path do bucket começa com o workspace
+  // id, e ele precisa bater com o workspace do documento autorizado.
+  if (!path.startsWith(`${authed.workspaceId}/`)) {
+    reply.code(403).send({ error: 'forbidden', message: 'path does not belong to this workspace' });
+    return;
+  }
+
+  const storage = serviceClient().storage.from(SOURCES_BUCKET);
+  const { data: file, error: downloadErr } = await storage.download(path);
+  if (downloadErr || !file) {
+    reply.code(404).send({ error: 'not_found', message: 'attachment not found' });
+    return;
+  }
+  const original = Buffer.from(await file.arrayBuffer());
+
+  let compressed: Buffer;
+  try {
+    compressed = await compressPdf(original, authed.documentId, 'anexo');
+  } catch (err) {
+    req.log.warn({ documentId, err }, 'attachment compression failed');
+    reply.code(200).send({ path, bytes: original.length, originalBytes: original.length, compressed: false });
+    return;
+  }
+  if (compressed.length === 0 || compressed.length >= original.length) {
+    reply.code(200).send({ path, bytes: original.length, originalBytes: original.length, compressed: false });
+    return;
+  }
+
+  const compressedPath = path.replace(/\.pdf$/, '-compressed.pdf');
+  const { error: uploadErr } = await storage.upload(compressedPath, compressed, {
+    contentType: 'application/pdf',
+    upsert: true,
+  });
+  if (uploadErr) {
+    req.log.warn({ documentId, msg: uploadErr.message }, 'compressed attachment upload failed');
+    reply.code(200).send({ path, bytes: original.length, originalBytes: original.length, compressed: false });
+    return;
+  }
+
+  req.log.info(
+    { documentId, originalBytes: original.length, compressedBytes: compressed.length },
+    'attachment compressed',
+  );
+  reply.code(200).send({
+    path: compressedPath,
+    bytes: compressed.length,
+    originalBytes: original.length,
+    compressed: true,
+  });
+});
 
 const start = async (): Promise<void> => {
   try {

@@ -118,8 +118,21 @@ export const renderDocumentPdf = async (args: {
       height: meta.pageHeightPx,
       deviceScaleFactor: 1,
     });
-    // Pequeno settle pra relayout da viewport
-    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+    // O resize acima muda o tamanho de LAYOUT das imagens, o que invalida o
+    // raster que o Chromium já tinha decodificado. Capturar direto depois disso
+    // é o que fazia imagem grande sair cortada no PDF (às vezes — depende de o
+    // decode ganhar ou perder a corrida). __PDF_SETTLE re-decodifica tudo e
+    // espera dois frames; o fallback de um rAF cobre páginas antigas em cache.
+    await page
+      .evaluate(async () => {
+        const settle = (window as unknown as { __PDF_SETTLE?: () => Promise<void> })
+          .__PDF_SETTLE;
+        if (settle) return settle();
+        return new Promise((r) => requestAnimationFrame(() => r(null)));
+      })
+      .catch((err: unknown) => {
+        logger.warn({ err, documentId: args.documentId }, 'PDF settle failed — capturing anyway');
+      });
 
     const widthIn = meta.pageWidthPx * PX_TO_IN;
     const heightIn = meta.pageHeightPx * PX_TO_IN;
