@@ -239,7 +239,12 @@ export const convertPdfToOffice = async (
  * de propósito: lá não existe fallback, o usuário PRECISA do .docx/.pptx.
  */
 const COMPRESS_POLL_MS = 35_000;
-const COMPRESS_DOWNLOAD_MS = 12_000;
+// O timeout cobre também o consumo do body, não apenas a chegada dos headers.
+// Em PDFs maiores o iLovePDF responde 200 rapidamente, mas pode levar mais de
+// 12s para terminar o stream — abortar nesse ponto descartava uma compressão
+// já concluída e entregava o original. Mantém um limite finito, porém compatível
+// com o orçamento total de ~1 minuto descrito acima.
+const COMPRESS_DOWNLOAD_MS = 30_000;
 
 export const compressPdf = async (
   pdfBuffer: Buffer,
