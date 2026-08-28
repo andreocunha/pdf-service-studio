@@ -108,7 +108,9 @@ export const renderDocumentPdf = async (args: {
       throw renderFailed(`Render page responded with status ${status}`);
     }
 
-    const { meta, fonts } = await waitForReady(page, config.requestTimeoutMs);
+    const ready = await waitForReady(page, config.requestTimeoutMs);
+    let meta = ready.meta;
+    const { fonts } = ready;
 
     // Ajusta a viewport pra bater exatamente com a largura da página.
     // Isso garante que `mx-auto` não cause offset horizontal e que cada
@@ -133,6 +135,33 @@ export const renderDocumentPdf = async (args: {
       .catch((err: unknown) => {
         logger.warn({ err, documentId: args.documentId }, 'PDF settle failed — capturing anyway');
       });
+
+    // Em documentos contínuos, mudar a viewport para a largura real pode
+    // alterar o wrap e, portanto, a altura total. O render client republica
+    // __PDF_META durante __PDF_SETTLE; releia e, se necessário, assente uma
+    // segunda vez antes de definir o tamanho físico da página única.
+    const settledMeta = await page.evaluate(() =>
+      (window as unknown as { __PDF_META: RenderMeta }).__PDF_META,
+    );
+    if (
+      settledMeta.pageWidthPx !== meta.pageWidthPx ||
+      settledMeta.pageHeightPx !== meta.pageHeightPx
+    ) {
+      meta = settledMeta;
+      await page.setViewport({
+        width: meta.pageWidthPx,
+        height: meta.pageHeightPx,
+        deviceScaleFactor: 1,
+      });
+      await page.evaluate(async () => {
+        const settle = (window as unknown as { __PDF_SETTLE?: () => Promise<void> })
+          .__PDF_SETTLE;
+        if (settle) await settle();
+      });
+      meta = await page.evaluate(() =>
+        (window as unknown as { __PDF_META: RenderMeta }).__PDF_META,
+      );
+    }
 
     const widthIn = meta.pageWidthPx * PX_TO_IN;
     const heightIn = meta.pageHeightPx * PX_TO_IN;
