@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { renderFailed } from './errors.js';
 import { logger } from './logger.js';
 import { signRenderToken } from './signing.js';
+import { preparePdfMasks } from './pdf-masks.js';
 
 type RenderMeta = {
   pageWidthPx: number;
@@ -34,10 +35,15 @@ const waitForReady = async (
 ): Promise<{ meta: RenderMeta; fonts: UsedFont[] }> => {
   await page.waitForFunction(
     () =>
-      (window as unknown as { __PDF_READY?: boolean }).__PDF_READY === true &&
-      typeof (window as unknown as { __PDF_META?: unknown }).__PDF_META === 'object',
+      Boolean((window as unknown as { __PDF_ERROR?: string }).__PDF_ERROR) ||
+      ((window as unknown as { __PDF_READY?: boolean }).__PDF_READY === true &&
+      typeof (window as unknown as { __PDF_META?: unknown }).__PDF_META === 'object'),
     { timeout: timeoutMs, polling: 100 },
   );
+  const error = await page.evaluate(() =>
+    (window as unknown as { __PDF_ERROR?: string }).__PDF_ERROR,
+  );
+  if (error) throw renderFailed(error);
   // Belt-and-suspenders: esperar todas fontes resolverem.
   await page.evaluate(async () => {
     if ('fonts' in document) {
@@ -133,7 +139,8 @@ export const renderDocumentPdf = async (args: {
         return new Promise((r) => requestAnimationFrame(() => r(null)));
       })
       .catch((err: unknown) => {
-        logger.warn({ err, documentId: args.documentId }, 'PDF settle failed — capturing anyway');
+        logger.warn({ err, documentId: args.documentId }, 'PDF settle failed');
+        throw renderFailed('O documento não terminou de carregar para exportação.');
       });
 
     // Em documentos contínuos, mudar a viewport para a largura real pode
@@ -163,6 +170,7 @@ export const renderDocumentPdf = async (args: {
       );
     }
 
+    const preparedMasks = await preparePdfMasks(page);
     const widthIn = meta.pageWidthPx * PX_TO_IN;
     const heightIn = meta.pageHeightPx * PX_TO_IN;
 
@@ -178,7 +186,7 @@ export const renderDocumentPdf = async (args: {
 
     const elapsed = Date.now() - start;
     logger.info(
-      { documentId: args.documentId, elapsedMs: elapsed, pdfBytes: pdf.length, fonts },
+      { documentId: args.documentId, elapsedMs: elapsed, pdfBytes: pdf.length, fonts, preparedMasks },
       'PDF rendered',
     );
 
