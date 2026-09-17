@@ -12,7 +12,10 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "dev": "tsx watch --env-file=.env src/server.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:pdf-masks": "tsx scripts/test-pdf-masks.ts",
+    "test:pdf-fidelity": "node --import tsx scripts/fidelity/audit.mts",
+    "test:pdf-font-failures": "node --import tsx scripts/fidelity/test-font-failures.mts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

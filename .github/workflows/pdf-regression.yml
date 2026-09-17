@@ -1,0 +1,25 @@
+name: PDF regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  linux-production-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image (includes TypeScript compilation)
+        run: docker build -t lex-pdf-validation .
+      - name: Test masks with production Linux Chromium and launch flags
+        run: |
+          docker run --rm --user root --entrypoint /bin/sh \
+            -v "$PWD/src:/app/src:ro" \
+            -v "$PWD/scripts:/app/scripts:ro" \
+            lex-pdf-validation -c \
+            'npm ci --include=dev --no-audit --no-fund --ignore-scripts && npm run test:pdf-masks'

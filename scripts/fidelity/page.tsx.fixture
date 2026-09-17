@@ -1,0 +1,9 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {ValidationClient} from './validation-client';
+export const dynamic='force-dynamic';
+export default async function Page({params,searchParams}:{params:Promise<{id:string}>,searchParams:Promise<{mode?:string}>}) {
+ const {id}=await params;if(!/^[a-f0-9-]{36}$/.test(id))throw new Error('Invalid fixture');
+ const fixture=JSON.parse(await fs.readFile(path.join(process.env.FIDELITY_FIXTURE_DIR!,id+'.json'),'utf8'));
+ return <ValidationClient fixture={fixture} mode={(await searchParams).mode||'export'}/>;
+}

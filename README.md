@@ -150,3 +150,78 @@ revoked_at = now() WHERE id = '<uuid>'`.
 - **Rate limit**: 30 req/minuto por chave (JWT ou API key). Configurável.
 - **Bypass de RLS**: a rota `/render-pdf/[id]` usa SECRET_KEY, mas só depois
   de validar HMAC — não é um endpoint público de leitura de documentos.
+
+## Compatibilidade com Preview e iOS
+
+Antes de imprimir, `preparePdfMasks` converte máscaras CSS de gradiente com
+bordas duras (por exemplo, cartões com recorte de selo) em `clip-path` vetorial.
+Isso evita os soft masks/padrões que o Quartz interpreta incorretamente. A
+conversão acontece apenas na página de exportação, após o layout final; não
+modifica templates salvos, texto, links ou dimensões. O contorno é amostrado a
+288 dpi, com limites de memória e de complexidade. Gradientes suaves, máscaras
+URL/SVG, pseudo-elementos e elementos que já têm `clip-path` ficam fora desta
+conversão.
+
+Validação:
+
+```bash
+npm run typecheck
+npm run test:pdf-masks
+```
+
+O teste usa `CHROMIUM_EXECUTABLE_PATH` quando informado; no Mac usa o Chrome
+instalado e em Linux o Chromium do pacote. No macOS, requer também `swiftc` e
+`pdftotext` (Poppler) para renderizar o PDF com CoreGraphics/Quartz e verificar
+as quatro bordas e a preservação de texto. PDFs de diagnóstico são gravados em
+um diretório temporário informado pelo teste. Nenhum documento de produção é
+necessário para esse teste. O workflow `PDF regression` compila a imagem do
+Dockerfile e roda a regressão no Chromium Linux empacotado, usando os mesmos
+argumentos de inicialização do serviço; não depende de credenciais ou documentos.
+
+### Critério de aceitação do PDF final
+
+O teste de máscaras acima verifica o recorte no mesmo navegador; ele **não**
+valida equivalência entre Mac e Linux nem substitui o download completo.
+`renderDocumentPdf()` devolve o PDF bruto. A rota `/pdf` ainda passa esse arquivo
+por `compressOrOriginal()`. Não entregar o retorno bruto como amostra final.
+O editor e a rota de PDF agora usam as mesmas métricas canônicas de fonte.
+Ainda assim, a validação local no Mac não substitui a execução no Chromium
+Linux da imagem de produção. Compare o mesmo documento/estado nos dois
+ambientes e após a compressão normal. A bateria completa e reproduzível de
+editor versus PDF está em [scripts/fidelity](scripts/fidelity/README.md).
+Fontes ou imagens que falham impedem a exportação, inclusive na espera final
+após o ajuste de viewport; um carregamento parcial não autoriza a captura.
+
+O verificador abaixo rejeita mudanças de páginas, coordenadas de palavras,
+bytes das fontes incorporadas, links e aumento de tamanho acima de 5%:
+
+```bash
+python3 -m pip install -r scripts/requirements-pdf-validation.txt
+python3 scripts/check-pdf-regression.py referencia.pdf candidato.pdf
+```
+
+Os scripts Python são ferramentas locais de diagnóstico, não dependências do
+servidor. Para recuperar um PDF já exportado sem recalcular seu layout, o
+utilitário abaixo reconhece apenas a estrutura de máscaras Skia suportada e
+recusa gradientes suaves. Requer `pdftocairo` (Poppler); revisar o resultado no
+Quartz e no Poppler e executar o verificador antes de entregar:
+
+```bash
+python3 scripts/repair-skia-mask-pdf.py referencia.pdf corrigido.pdf
+python3 scripts/check-pdf-regression.py referencia.pdf corrigido.pdf
+```
+
+### Ícones Phosphor durante a exportação
+
+O frontend serve os ícones Phosphor empacotados por `/api/icons/ph/[icon]`.
+Os templates mantêm as URLs portáveis originais; a renderização no editor e
+no PDF converte URLs Iconify `ph:nome.svg` e `ph/nome.svg` para esse endpoint.
+Isso elimina a dependência do limite de requisições do Iconify para os ícones
+locais suportados. Vetores, pesos, cores e dimensões intrínsecas são preservados.
+A rota não consulta a rede, e seus assets entram no file tracing de produção.
+
+Teste no frontend: `npm run test:local-icons`. A regressão foi reproduzida nos
+documentos `2f182d93-3431-4a29-bd2e-551b39ce57cc` e
+`98db49b5-f35b-43b8-b89e-d0b621352419`; ambos ficaram prontos com todas as
+imagens carregadas e sem chamadas ao Iconify, inclusive com o domínio bloqueado.
+Os PDFs finais passaram pela renderização e compressão normais do serviço.

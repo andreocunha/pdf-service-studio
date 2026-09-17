@@ -1,0 +1,32 @@
+'use client';
+import {useEffect,useMemo} from 'react';
+import dynamic from 'next/dynamic';
+import {PdfRenderClient} from '../../[id]/pdf-render-client';
+import {createStaticLibrary} from '../../[id]/static-library';
+import {DEFAULT_DOCUMENT_PAGE} from '@/app/editor/utils';
+import {finishDocumentRendering,waitForDocumentLayout} from '@/app/editor/utils/progressiveRendering';
+const NotionEditor=dynamic(()=>import('@/app/editor').then(m=>m.NotionEditor),{ssr:false});
+export function ValidationClient({fixture:f,mode}:{fixture:any,mode:string}) {
+ // Mirror the authenticated export route: a fixture must not silently grant
+ // access to a referenced template in an unrelated workspace.
+ const templates=useMemo(()=>f.templates.filter((t:any)=>t.workspace_id===f.workspaceId||[f.id,f.effectiveDocumentId].includes(t.document_id)||f.publicTemplateIds?.includes(t.id)),[f]);
+ const library=useMemo(()=>createStaticLibrary({rawTemplates:templates,rawClauses:f.rawClauses||[],documentId:f.id,effectiveDocumentId:f.effectiveDocumentId||f.id}),[f,templates]);
+ useEffect(()=>{
+  if(mode!=='editor')return;
+  let cancelled=false;
+  void(async()=>{
+   let root:HTMLElement|null=null;
+   const deadline=Date.now()+180000;
+   while(!root && Date.now()<deadline){await new Promise(r=>setTimeout(r,100));root=document.querySelector('[data-doc-root]')}
+   if(!root)throw new Error('Editor did not mount');
+
+   while(Date.now()<deadline){
+    try {await finishDocumentRendering(root);await waitForDocumentLayout(root);break;}catch(e){if(Date.now()>=deadline)throw e;}
+   }
+   if(!cancelled)(window as any).__FIDELITY_READY=true;
+  })().catch(e=>(window as any).__FIDELITY_ERROR=String(e));
+  return()=>{cancelled=true};
+ },[mode]);
+ if(mode==='export')return <PdfRenderClient title={f.title} blocks={f.blocks} meta={f.meta} pageBackground={f.meta.pageBackground} documentSettings={f.meta.documentSettings} documentId={f.id} workspaceId={f.workspaceId} rawTemplates={templates} rawClauses={f.rawClauses||[]} effectiveDocumentId={f.effectiveDocumentId||f.id}/>;
+ return <div style={{height:'100vh',width:1200}}><NotionEditor title={f.title} initialBlocks={f.blocks} initialMeta={f.meta} defaultViewMode="paginated" designLibrary={library} config={{defaultZoom:1,enableVersionHistory:false,enableComments:false,page:DEFAULT_DOCUMENT_PAGE}}/></div>;
+}
