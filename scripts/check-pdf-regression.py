@@ -20,6 +20,8 @@ parser.add_argument('candidate', type=Path)
 parser.add_argument('--max-size-ratio', type=float, default=1.05)
 parser.add_argument('--link-coordinate-tolerance', type=float, default=0,
                     help='Allowed PDF-point rounding for annotation rectangles only; destinations stay exact')
+parser.add_argument('--fit-width-links', action='store_true',
+                    help='Allow XYZ inherited zoom to become FitH at the exact same page/y coordinate')
 args = parser.parse_args()
 
 
@@ -60,9 +62,17 @@ def audit(path):
                 visit(value)
 
     def destination(value):
+        # Compare actual targets, allowing named destinations to become explicit
+        # GoTo actions without hiding a changed page/position/zoom.
+        if isinstance(value, IndirectObject):
+            value = value.get_object()
+        if isinstance(value, str) and value in reader.named_destinations:
+            value = reader.named_destinations[value].dest_array
+        if isinstance(value, dict):
+            value = value.get('/D', value)
         if isinstance(value, list):
             return [page_refs.get(value[0].idnum) if isinstance(value[0], IndirectObject) else value[0],
-                    *[str(v) for v in value[1:]]]
+                    *[float(v) if isinstance(v, (int, float)) else str(v) for v in value[1:]]]
         return str(value)
 
     links = []
@@ -96,7 +106,14 @@ for key in ('pages', 'words', 'fonts'):
         errors.append(f'{key} changed')
 links_equal = len(reference['links']) == len(candidate['links'])
 for before, after in zip(reference['links'], candidate['links']):
-    links_equal &= all(before[k] == after[k] for k in ('page', 'uri', 'dest'))
+    links_equal &= all(before[k] == after[k] for k in ('page', 'uri'))
+    dest_equal = before['dest'] == after['dest']
+    old, new = before['dest'], after['dest']
+    if (args.fit_width_links and isinstance(old, list) and len(old) == 5
+            and old[1] == '/XYZ' and old[4] in (0, 'NullObject')
+            and isinstance(old[3], (int, float))):
+        dest_equal |= new == [old[0], '/FitH', old[3]]
+    links_equal &= dest_equal
     links_equal &= all(abs(x - y) <= args.link_coordinate_tolerance
                        for x, y in zip(before['rect'], after['rect']))
 if not links_equal:

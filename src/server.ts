@@ -10,6 +10,7 @@ import type { IlovepdfTask, OfficeFormat } from './ilovepdf.js';
 import { HttpError } from './errors.js';
 import { logger } from './logger.js';
 import { renderDocumentPdf } from './render.js';
+import { normalizePdfLinks } from './pdf-links.js';
 import { serviceClient } from './supabase.js';
 
 const app = Fastify({
@@ -132,14 +133,16 @@ app.post<{ Body: PdfBody }>('/pdf', async (req, reply) => {
   ]);
 
   const clean = cleanTitle(title);
-  const delivered = await compressOrOriginal(buffer, authed.documentId, clean, compressTask);
+  const compressed = await compressOrOriginal(buffer, authed.documentId, clean, compressTask);
+  const links = await normalizePdfLinks(compressed);
+  logger.info({ documentId, converted: links.converted, unresolved: links.unresolved }, 'PDF internal links normalized');
 
   reply
     .code(200)
     .header('Content-Type', 'application/pdf')
     .header('Content-Disposition', dispositionFor(clean, 'pdf'))
     .header('Cache-Control', 'no-store')
-    .send(delivered);
+    .send(links.buffer);
 });
 
 // docx (Word) e pptx (PowerPoint) compartilham o mesmo fluxo via ilovepdf/pdfoffice.
