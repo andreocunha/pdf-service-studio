@@ -225,3 +225,24 @@ documentos `2f182d93-3431-4a29-bd2e-551b39ce57cc` e
 `98db49b5-f35b-43b8-b89e-d0b621352419`; ambos ficaram prontos com todas as
 imagens carregadas e sem chamadas ao Iconify, inclusive com o domínio bloqueado.
 Os PDFs finais passaram pela renderização e compressão normais do serviço.
+
+### Links internos em leitores de PDF
+
+A rota `/pdf` resolve destinos nomeados para ações `/GoTo` com referência direta
+à página, após a compressão. Isso remove a necessidade de o leitor consultar o
+dicionário de destinos do Chromium. Destinos `/XYZ` com zoom herdado usam `/FitH`
+para ajustar à largura e solicitar o alinhamento da seção ao topo da tela. A página
+e a coordenada vertical são preservadas, inclusive para saltos dentro da mesma
+página; destinos com zoom explícito permanecem intactos. Links externos
+e destinos não resolvidos permanecem intactos; os contadores ficam no log.
+
+`npm run test:pdf-links` cobre destinos legados, árvores de nomes, links externos,
+destinos ausentes/cíclicos e reprocessamento. `check-pdf-regression.py` compara o
+destino efetivo, além de textos, fontes, geometria e regiões clicáveis. A opção
+`--fit-width-links` permite somente essa mudança de enquadramento, exigindo a
+mesma página e coordenada vertical.
+
+A normalização amplia a compatibilidade do formato, mas não acrescenta suporte
+à navegação interna em aplicativos que não a implementam. Validar o toque nos
+leitores nativos de iOS/Android antes de anunciar a correção para esses leitores;
+a resolução de destinos pelo PDFKit no macOS não substitui esse teste.
