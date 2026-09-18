@@ -1,8 +1,8 @@
-import type { Page } from 'puppeteer-core';
+import { TimeoutError, type Page } from 'puppeteer-core';
 
 import { getBrowser } from './browser.js';
 import { config } from './config.js';
-import { renderFailed } from './errors.js';
+import { HttpError, renderFailed } from './errors.js';
 import { logger } from './logger.js';
 import { signRenderToken } from './signing.js';
 import { preparePdfMasks } from './pdf-masks.js';
@@ -174,7 +174,12 @@ export const renderDocumentPdf = async (args: {
     const widthIn = meta.pageWidthPx * PX_TO_IN;
     const heightIn = meta.pageHeightPx * PX_TO_IN;
 
+    const printStart = Date.now();
+    logger.info({ documentId: args.documentId, timeoutMs: config.pdfPrintTimeoutMs }, 'Printing PDF');
     const pdf = await page.pdf({
+      // Printing has its own Puppeteer timeout; REQUEST_TIMEOUT_MS only covers
+      // navigation/readiness. Image-heavy documents can take longer than 30s.
+      timeout: config.pdfPrintTimeoutMs,
       width: `${widthIn}in`,
       height: `${heightIn}in`,
       printBackground: true,
@@ -182,6 +187,12 @@ export const renderDocumentPdf = async (args: {
       margin: { top: 0, right: 0, bottom: 0, left: 0 },
       displayHeaderFooter: false,
       tagged: true,
+    }).catch((err: unknown) => {
+      logger.error({ err, documentId: args.documentId, elapsedMs: Date.now() - printStart }, 'PDF printing failed');
+      if (err instanceof TimeoutError) {
+        throw new HttpError(504, 'pdf_print_timeout', 'O PDF demorou mais que o limite de impressão. Tente novamente.');
+      }
+      throw err;
     });
 
     const elapsed = Date.now() - start;
