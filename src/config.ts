@@ -20,6 +20,7 @@ export const config = {
   supabaseSecretKey: required('SUPABASE_SECRET_KEY'),
   chromiumExecutablePath: optional('CHROMIUM_EXECUTABLE_PATH'),
   requestTimeoutMs: Number(optional('REQUEST_TIMEOUT_MS', '30000')),
+  pdfPrintTimeoutMs: Number(optional('PDF_PRINT_TIMEOUT_MS', '120000')),
   isProduction: process.env.NODE_ENV === 'production',
 } as const;
 

@@ -16,10 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build production image (includes TypeScript compilation)
         run: docker build -t lex-pdf-validation .
-      - name: Test masks with production Linux Chromium and launch flags
+      - name: Test printing, links, download fallback and masks in the production image
         run: |
           docker run --rm --user root --entrypoint /bin/sh \
             -v "$PWD/src:/app/src:ro" \
             -v "$PWD/scripts:/app/scripts:ro" \
             lex-pdf-validation -c \
-            'npm ci --include=dev --no-audit --no-fund --ignore-scripts && npm run test:pdf-masks'
+            'npm ci --include=dev --no-audit --no-fund --ignore-scripts && npm run test:pdf-print && npm run test:pdf-links && npm run test:pdf-download && npm run test:pdf-masks'

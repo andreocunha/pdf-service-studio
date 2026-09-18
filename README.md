@@ -62,6 +62,18 @@ npm install
 npm run dev       # tsx watch + auto-reload
 ```
 
+O carregamento do documento usa `REQUEST_TIMEOUT_MS` (30 segundos por padrão).
+A impressão do Chromium tem um limite separado, `PDF_PRINT_TIMEOUT_MS`
+(120 segundos por padrão), porque PDFs com muitas imagens podem ultrapassar
+30 segundos mesmo com a página pronta. O timeout do protocolo acompanha esse
+limite. Se a impressão exceder o prazo, a rota responde `504/pdf_print_timeout`
+e registra a etapa nos logs. Não é um prazo total da exportação: compressão e
+download têm seus próprios limites.
+
+Após `npm run build`, `npm run test:pdf-print` exercita o render compilado com
+Chromium real e uma resposta de impressão atrasada em 31 segundos; cobre também
+o prazo configurável e o fechamento da página quando ele expira.
+
 Lado do Next.js (`lex-studio-v2`):
 ```bash
 echo "PDF_SERVICE_SECRET=<mesmo_hex>" >> .env.local
@@ -235,12 +247,18 @@ para ajustar à largura e solicitar o alinhamento da seção ao topo da tela. A 
 e a coordenada vertical são preservadas, inclusive para saltos dentro da mesma
 página; destinos com zoom explícito permanecem intactos. Links externos
 e destinos não resolvidos permanecem intactos; os contadores ficam no log.
+Se a normalização lançar uma exceção, o download entrega os mesmos bytes do PDF
+já renderizado/comprimido e registra a falha, em vez de interromper a exportação.
+Nesse caso, o arquivo mantém seus links originais, sem a melhoria de compatibilidade.
 
 `npm run test:pdf-links` cobre destinos legados, árvores de nomes, links externos,
 destinos ausentes/cíclicos e reprocessamento. `check-pdf-regression.py` compara o
 destino efetivo, além de textos, fontes, geometria e regiões clicáveis. A opção
 `--fit-width-links` permite somente essa mudança de enquadramento, exigindo a
 mesma página e coordenada vertical.
+`npm run test:pdf-download` (após o build) exercita a rota HTTP compilada, incluindo
+uma falha injetada após a leitura de um PDF válido, e exige resposta 200 com os
+bytes originais. Esses testes também rodam no container Linux de produção no CI.
 
 A normalização amplia a compatibilidade do formato, mas não acrescenta suporte
 à navegação interna em aplicativos que não a implementam. Validar o toque nos

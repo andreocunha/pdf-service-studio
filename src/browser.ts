@@ -47,6 +47,7 @@ const launch = async (): Promise<Browser> => {
     executablePath,
     headless,
     args,
+    protocolTimeout: Math.max(180_000, config.pdfPrintTimeoutMs + 30_000),
     defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 1 },
   });
   browser.on('disconnected', () => {
