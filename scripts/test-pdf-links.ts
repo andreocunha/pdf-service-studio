@@ -46,7 +46,7 @@ for (let i = 0; i < 6; i++) {
   assert.equal(annotation.has(name('Dest')), false);
   const action = annotation.lookup(name('A'), PDFDict);
   assert.equal(action.get(name('S'))?.toString(), '/GoTo');
-  const expected = i === 1 ? c.obj([first.ref, 'FitH', 123.45]) : c.obj([last.ref, 'FitH', 350.88]);
+  const expected = i === 1 ? c.obj([first.ref, 'XYZ', null, 123.45, null]) : c.obj([last.ref, 'XYZ', null, 350.88, null]);
   assert.equal(action.lookup(name('D'), PDFArray).toString(), expected.toString());
   assert.equal(annotation.lookup(name('Rect'), PDFArray).toString(), '[ 10 20 200 45 ]');
 }
@@ -63,4 +63,24 @@ externalOnly.addPage().node.set(name('Annots'), externalOnly.context.obj([{
 }]));
 const externalBytes = Buffer.from(await externalOnly.save());
 assert.strictEqual((await normalizePdfLinks(externalBytes)).buffer, externalBytes);
-console.log('PASS: legacy/name-tree links, fit-width/top alignment, same-page positions, explicit zooms, external actions, missing/cyclic targets and idempotence.');
+
+// Previously generated FitH links must retain their exact section coordinates.
+const fitPdf = await PDFDocument.create();
+const fitPage = fitPdf.addPage([600, 800]);
+fitPage.node.set(name('Annots'), fitPdf.context.obj([750, 350, null].map(top => ({
+  Type: 'Annot', Subtype: 'Link', Rect: [0, 0, 100, 20],
+  A: { S: 'GoTo', D: [fitPage.ref, 'FitH', top] },
+}))));
+const repaired = await normalizePdfLinks(Buffer.from(await fitPdf.save()));
+assert.equal(repaired.converted, 2);
+const repairedPdf = await PDFDocument.load(repaired.buffer);
+const repairedLinks = repairedPdf.getPage(0).node.lookup(name('Annots'), PDFArray);
+for (const [index, top] of [750, 350].entries()) {
+  assert.equal(repairedLinks.lookup(index, PDFDict).lookup(name('A'), PDFDict)
+    .lookup(name('D'), PDFArray).toString(),
+  fitPdf.context.obj([fitPage.ref, 'XYZ', null, top, null]).toString());
+}
+assert.equal(repairedLinks.lookup(2, PDFDict).lookup(name('A'), PDFDict)
+  .lookup(name('D'), PDFArray).toString(), fitPdf.context.obj([fitPage.ref, 'FitH', null]).toString());
+assert.strictEqual((await normalizePdfLinks(repaired.buffer)).buffer, repaired.buffer);
+console.log('PASS: legacy/name-tree links, XYZ destinations, same-page coordinates, FitH conversion, explicit zooms, external actions, missing/cyclic targets and idempotence. Reader viewport alignment requires device testing.');

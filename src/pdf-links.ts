@@ -7,8 +7,9 @@ import {
  * Chromium emits /Dest /name links. Resolve those to explicit GoTo actions so
  * readers need neither legacy catalog destinations nor a name-tree lookup.
  * Run AFTER compression, which may rewrite annotation/destination objects.
- * Chromium's XYZ destinations with inherited zoom become FitH destinations:
- * fit the page width and place the section's y coordinate at the viewport top.
+ * Use XYZ with inherited horizontal position and zoom: Chrome/Edge honor the
+ * exact section height; Google Drive on Android centers that point instead.
+ * This is the user-approved behavior; see docs/pdf-link-compatibility.md.
  * Explicit zooms, page references, hit areas and external actions stay intact.
  */
 export async function normalizePdfLinks(input: Buffer): Promise<{
@@ -91,7 +92,16 @@ export async function normalizePdfLinks(input: Buffer): Promise<{
         if (top instanceof PDFNumber && (zoom === PDFNull || (zoom instanceof PDFNumber && zoom.asNumber() === 0))) {
           // Preserve the section position, including sections halfway down a
           // page. Do not mutate a destination shared by bookmarks/other links.
-          view = context.obj([destination.get(0), 'FitH', top]);
+          // FitH loses its top coordinate in Chromium's link-click path.
+          if (lookup(destination.get(2)) !== PDFNull || zoom !== PDFNull) {
+            view = context.obj([destination.get(0), 'XYZ', null, top, null]);
+          }
+        }
+      } else if (destination.size() === 3 && keyOf(destination.get(1)) === 'FitH') {
+        const top = lookup(destination.get(2));
+        if (top instanceof PDFNumber) {
+          // Support reprocessing downloads produced by the previous normalizer.
+          view = context.obj([destination.get(0), 'XYZ', null, top, null]);
         }
       }
       if (view === destination && action instanceof PDFDict && lookup(value) instanceof PDFArray && !annotation.has(name('Dest'))) continue;

@@ -63,7 +63,11 @@ async function check(failure) {
       const link = output.getPage(0).node.lookup(PDFName.of('Annots'), PDFArray).lookup(0, PDFDict);
       const action = link.lookup(PDFName.of('A'), PDFDict);
       assert.equal(action.get(PDFName.of('S')).toString(), '/GoTo');
-      assert.equal(action.lookup(PDFName.of('D'), PDFArray).get(1).toString(), '/FitH');
+      const destination = action.lookup(PDFName.of('D'), PDFArray);
+      assert.equal(destination.get(1).toString(), '/XYZ');
+      assert.equal(destination.get(2).toString(), 'null');
+      assert.equal(destination.get(3).asNumber(), 700);
+      assert.equal(destination.get(4).toString(), 'null');
     }
     assert.equal((await fetch(`${address}/health`)).status, 200, 'server stays healthy');
     console.log(`PASS: compiled /pdf HTTP route ${failure ? 'returns original PDF after normalization failure' : 'delivers mobile-compatible menu links'}.`);
