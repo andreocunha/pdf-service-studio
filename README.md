@@ -143,6 +143,27 @@ O script imprime a key pleno uma única vez — copie no ato. O banco guarda
 apenas o SHA-256. Para revogar, basta `UPDATE workspace_api_keys SET
 revoked_at = now() WHERE id = '<uuid>'`.
 
+## Fontes no Word (`/docx`)
+
+O iLovePDF monta o .docx com ótima fidelidade, mas troca as fontes do
+documento por Arial/Arial Black/Times e corrompe parte do texto (letras e até
+números trocados — "Rescisio", "m execução", "O123V56Y89" —, espaço no meio
+de palavra com letter-spacing, ligaduras "ﬁ"). Depois da conversão,
+`src/docx-fonts.ts` usa o próprio PDF como verdade: devolve as fontes reais,
+refaz as compensações de largura e entrelinha para elas, conserta o texto e
+embute as fontes no .docx. É best-effort: qualquer falha entrega o .docx do
+iLovePDF como veio.
+
+As fontes vêm do app: `<RENDER_BASE_URL>/word-fonts/` (manifest, métricas e
+os .ttf de cada face), geradas em `lex-studio-v2` pelo `npm run fonts:import`
+junto com as fontes do editor — o `prebuild` do app barra deploy se estiverem
+desatualizadas. Nada de fonte mora neste serviço: fonte nova = só deploy do app.
+
+Fonte fora do manifest (ou app fora do ar) sai no Word com o substituto do iLovePDF.
+Para conferir um par PDF + .docx sem gastar conversão:
+`npm run test:docx-fonts -- doc.pdf doc.docx` (lê as fontes do app local em
+:3000; `WORD_FONTS_URL=...` pra outro).
+
 ## Performance
 
 - Chromium fica vivo entre requisições (warm pool). Cold-start apenas na

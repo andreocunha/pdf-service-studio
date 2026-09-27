@@ -3,6 +3,7 @@ import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 
 import { authorize } from './auth.js';
+import { restoreDocxFonts } from './docx-fonts.js';
 import { closeBrowser, warmUpBrowser } from './browser.js';
 import { config } from './config.js';
 import { compressPdf, convertPdfToOffice, startIlovepdfTask } from './ilovepdf.js';
@@ -150,6 +151,33 @@ const OFFICE_CONTENT_TYPE: Record<OfficeFormat, string> = {
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 };
 
+/**
+ * Troca as fontes substitutas do iLovePDF pelas reais e as embute. Best-effort:
+ * qualquer falha — ou demora além de DOCX_FONTS_BUDGET_MS — entrega o docx do
+ * iLovePDF como veio; o download nunca depende desta etapa. Normal: ~1s.
+ */
+const DOCX_FONTS_BUDGET_MS = 20_000;
+
+const withRealFonts = async (docx: Buffer, pdf: Buffer, documentId: string): Promise<Buffer> => {
+  const t0 = Date.now();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const { docx: fixed, report } = await Promise.race([
+      restoreDocxFonts(docx, pdf, `${config.renderBaseUrl}/word-fonts/`),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('docx fonts timed out')), DOCX_FONTS_BUDGET_MS);
+      }),
+    ]);
+    logger.info({ documentId, elapsedMs: Date.now() - t0, bytes: fixed.length, ...report }, 'docx fonts restored');
+    return fixed;
+  } catch (err) {
+    logger.warn({ documentId, err, elapsedMs: Date.now() - t0 }, 'docx fonts: kept iLovePDF output');
+    return docx;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const handleOfficeExport = async (
   format: OfficeFormat,
   req: import('fastify').FastifyRequest<{ Body: PdfBody }>,
@@ -176,7 +204,8 @@ const handleOfficeExport = async (
     startIlovepdfTask('pdfoffice'),
   ]);
   const clean = cleanTitle(title);
-  const officeBuffer = await convertPdfToOffice(pdfBuffer, authed.documentId, clean, format, ilovepdfTask);
+  const converted = await convertPdfToOffice(pdfBuffer, authed.documentId, clean, format, ilovepdfTask);
+  const officeBuffer = format === 'docx' ? await withRealFonts(converted, pdfBuffer, authed.documentId) : converted;
 
   reply
     .code(200)
