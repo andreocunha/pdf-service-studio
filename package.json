@@ -18,7 +18,8 @@
     "test:pdf-download": "node scripts/test-pdf-download.mjs",
     "test:pdf-print": "node scripts/test-pdf-print.mjs && node scripts/test-pdf-print.mjs --expect-timeout",
     "test:pdf-fidelity": "node --import tsx scripts/fidelity/audit.mts",
-    "test:pdf-font-failures": "node --import tsx scripts/fidelity/test-font-failures.mts"
+    "test:pdf-font-failures": "node --import tsx scripts/fidelity/test-font-failures.mts",
+    "test:docx-fonts": "node --import tsx scripts/test-docx-fonts.mts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
@@ -26,7 +27,9 @@
     "@sparticuz/chromium": "147.0.0",
     "@supabase/supabase-js": "^2.48.0",
     "fastify": "^5.2.1",
+    "fflate": "^0.8.3",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38",
     "pino": "^9.5.0",
     "puppeteer-core": "^24.1.0"
   },
