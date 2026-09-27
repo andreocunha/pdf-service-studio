@@ -175,6 +175,11 @@ type PdfText = {
    * iLovePDF (ele lê letter-spacing largo como separação: "TRI MESTRE").
    */
   joined: Uint8Array;
+  /**
+   * 1 = há glifo de espaço entre o caractere i−1 e o i, na mesma linha. Se o
+   * docx não tem espaço ali, o iLovePDF o apagou ("CONTRATANTE·CONTRATADA").
+   */
+  spaced: Uint8Array;
   /** Palavras do PDF (sequências coladas, sem pontuação nas pontas). */
   words: Set<string>;
 };
@@ -183,6 +188,12 @@ type PdfGlyph = { unicode?: string; width?: number } | number;
 
 /** Palavra sem pontuação nas pontas ("serviços." → "serviços"). */
 const bareWord = (w: string): string => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+
+/**
+ * Passo entre dois glifos que já não é letter-spacing (tab, outra coluna).
+ * Letter-spacing de título chega a ~0,5em; abaixo de 1em é a mesma palavra.
+ */
+const JUMP_EM = 1;
 
 const readPdfText = async (pdf: Buffer, fonts: FontData): Promise<PdfText> => {
   const { getDocument, OPS } = await import('pdfjs-dist/legacy/build/pdf.mjs');
@@ -199,8 +210,11 @@ const readPdfText = async (pdf: Buffer, fonts: FontData): Promise<PdfText> => {
   const extra: number[] = [];
   const spaceExtra: number[] = [];
   const joined: number[] = [];
+  const spaced: number[] = [];
   let pendingSpace: number[] = [];
   let sameFragment = false;
+  // Mudou de linha desde o último caractere visível (espaço de fim de linha não conta).
+  let newLine = true;
 
   const push = (unicode: string, face: Face | null, actualEm: number) => {
     const metric = face ? metrics.get(face) : undefined;
@@ -215,6 +229,7 @@ const readPdfText = async (pdf: Buffer, fonts: FontData): Promise<PdfText> => {
     const spaces = pendingSpace.filter((d) => !Number.isNaN(d));
     const before = spaces.length ? spaces.reduce((a, b) => a + b, 0) / spaces.length : NaN;
     const glued = sameFragment && pendingSpace.length === 0 && chars.length > 0;
+    const hadSpace = pendingSpace.length > 0 && !newLine && chars.length > 0;
     pendingSpace = [];
     for (const [k, ch] of [...visible].entries()) {
       chars.push(ch);
@@ -222,8 +237,10 @@ const readPdfText = async (pdf: Buffer, fonts: FontData): Promise<PdfText> => {
       extra.push(visible.length === 1 ? delta : NaN);
       spaceExtra.push(before);
       joined.push(k > 0 || glued ? 1 : 0);
+      spaced.push(k === 0 && hadSpace ? 1 : 0);
     }
     sameFragment = true;
+    newLine = false;
   };
 
   try {
@@ -231,6 +248,8 @@ const readPdfText = async (pdf: Buffer, fonts: FontData): Promise<PdfText> => {
       const page = await doc.getPage(n);
       const { fnArray, argsArray } = await page.getOperatorList();
       let face: Face | null = null;
+      let lineY = NaN;
+      newLine = true;
       let size = 1;
       let unitsPerEm = 0.001;
       for (let i = 0; i < fnArray.length; i++) {
@@ -253,7 +272,14 @@ const readPdfText = async (pdf: Buffer, fonts: FontData): Promise<PdfText> => {
         }
         // Novo fragmento de texto: posição absoluta ou mudança de linha.
         if (fn === OPS.setTextMatrix || fn === OPS.beginText || fn === OPS.endText) sameFragment = false;
-        if (fn === OPS.moveText && Math.abs((args as number[])[1]) > 1e-6) sameFragment = false;
+        if (fn === OPS.setTextMatrix && (args as number[])[5] !== lineY) {
+          lineY = (args as number[])[5];
+          newLine = true;
+        }
+        if (fn === OPS.moveText && Math.abs((args as number[])[1]) > 1e-6) {
+          sameFragment = false;
+          newLine = true;
+        }
         if (fn !== OPS.showText) continue;
         const glyphs = args[0] as PdfGlyph[];
         const real = glyphs.filter((g): g is { unicode?: string; width?: number } => typeof g !== 'number');
@@ -269,7 +295,7 @@ const readPdfText = async (pdf: Buffer, fonts: FontData): Promise<PdfText> => {
           // Só vale se for mesmo o passo de uma letra — na mesma linha de base
           // o moveText também pode ser um salto pra outra coluna.
           const step = next && Math.abs(next[1]) < 1e-6 ? next[0] / size : NaN;
-          const jump = real.length === 1 && !Number.isNaN(step) && Math.abs(step - advance) >= 0.25;
+          const jump = real.length === 1 && !Number.isNaN(step) && Math.abs(step - advance) >= JUMP_EM;
           if (real.length === 1 && !jump && !Number.isNaN(step)) advance = step;
           push(g.unicode, face, advance);
           // Salto na mesma linha de base (tab, coluna): o próximo glifo é outro fragmento.
@@ -294,6 +320,7 @@ const readPdfText = async (pdf: Buffer, fonts: FontData): Promise<PdfText> => {
     extra: Float64Array.from(extra),
     spaceExtra: Float64Array.from(spaceExtra),
     joined: Uint8Array.from(joined),
+    spaced: Uint8Array.from(spaced),
     words,
   };
 };
@@ -669,6 +696,11 @@ class Aligner {
     return at > 0 && at < this.pdf.text.length && this.pdf.joined[at] === 1;
   }
 
+  /** Espaço que existe no PDF antes do caractere `at` e o iLovePDF apagou. */
+  missingSpaceAt(at: number): boolean {
+    return at > 0 && at < this.pdf.text.length && this.pdf.spaced[at] === 1;
+  }
+
   faceAt({ at, length }: { at: number; length: number }): Face | null {
     const votes = new Map<Face, number>();
     for (let i = at; i < at + length; i++) {
@@ -934,14 +966,23 @@ const TEXT_PARTS = /^word\/(document|header\d*|footer\d*|footnotes|endnotes)\.xm
 /** Ligaduras de apresentação (U+FB00–FB06): "ﬁ" num caractere só quebra busca e corretor no Word. */
 const LIGATURE = /[\ufb00-\ufb06]/;
 
-type TextFixes = { repaired: number; spacesRemoved: number; ligatures: number; split: number };
+type TextFixes = { repaired: number; spacesRemoved: number; spacesAdded: number; ligatures: number; split: number };
 
 /**
  * Corrige o texto de um run contra o PDF: letras trocadas (placement.repair),
  * espaço inventado no meio da palavra e ligaduras. Anda nos caracteres do
  * docx acompanhando a posição no texto visível do PDF. null = nada muda.
  */
-const fixRunText = (texts: string[], placement: Placement, aligner: Aligner, fixes: TextFixes): string[] | null => {
+/** Estado do parágrafo entre um run e o próximo (espaço é decidido por parágrafo). */
+type ParagraphText = { started: boolean; space: boolean };
+
+const fixRunText = (
+  texts: string[],
+  placement: Placement,
+  aligner: Aligner,
+  fixes: TextFixes,
+  para: ParagraphText,
+): string[] | null => {
   let k = 0; // posição no texto visível do run
   let changed = false;
   const out = texts.map((text) => {
@@ -955,9 +996,17 @@ const fixRunText = (texts: string[], placement: Placement, aligner: Aligner, fix
           changed = true;
           continue;
         }
+        if (/\s/.test(c)) para.space = true;
         result += c;
         continue;
       }
+      if (placement?.exact && para.started && !para.space && aligner.missingSpaceAt(placement.at + k)) {
+        result += ' ';
+        fixes.spacesAdded++;
+        changed = true;
+      }
+      para.started = true;
+      para.space = false;
       const right = placement?.repair?.slice(k, k + n.length).join('');
       if (right !== undefined && right !== n) {
         result += right;
@@ -1258,6 +1307,7 @@ export const restoreDocxFonts = async (
     embedded: [],
     repaired: 0,
     spacesRemoved: 0,
+    spacesAdded: 0,
     ligatures: 0,
     split: 0,
   };
@@ -1273,15 +1323,19 @@ export const restoreDocxFonts = async (
         .map((p) => p.id),
     );
 
+    const paraText = new Map<number, ParagraphText>();
     for (const l of located) {
       if (!l.run.text) continue;
       const blank = normalize(l.run.text) === '';
       if (!blank) report.runs++;
+      let ctx = paraText.get(l.run.para);
+      if (!ctx) paraText.set(l.run.para, (ctx = { started: false, space: false }));
       const fixed = fixRunText(
         l.run.texts.map((r) => unescapeXml(xml.slice(r.start, r.end))),
         l.placement,
         aligner,
         report,
+        ctx,
       );
       const split = splitByFace(xml, l.run, l.rPr, l.placement, l.sz, aligner, fixed?.[0]);
       if (split) {
@@ -1294,7 +1348,15 @@ export const restoreDocxFonts = async (
         continue;
       }
       if (fixed) {
-        l.run.texts.forEach((r, k) => edits.push({ start: r.start, end: r.end, text: escapeText(fixed[k]) }));
+        l.run.texts.forEach((r, k) => {
+          edits.push({ start: r.start, end: r.end, text: escapeText(fixed[k]) });
+          // Espaço na ponta do texto some no Word sem xml:space="preserve".
+          const tagStart = xml.lastIndexOf('<w:t', r.start);
+          const tag = xml.slice(tagStart, r.start);
+          if (/^\s|\s$/.test(fixed[k]) && /^<w:t(?:\s[^>]*)?>$/.test(tag) && !tag.includes('xml:space')) {
+            edits.push({ start: tagStart, end: r.start, text: '<w:t xml:space="preserve">' });
+          }
+        });
       }
       // Achado no PDF numa fonte que não temos: fica como o iLovePDF deixou.
       if (l.face === null) continue;
