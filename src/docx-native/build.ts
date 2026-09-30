@@ -104,7 +104,7 @@ type CellIR = {
   /** Espaço vazio entre colunas (recebe enfeites tirados do corte). */
   gap?: boolean;
   /** Arte atrás do conteúdo (banner com gradiente/ilustração): imagem ancorada na célula, atrás do texto. */
-  backdrop?: { image: ImageData; w: number; h: number; x?: number; y?: number; front?: boolean };
+  backdrop?: { image: ImageData; w: number; h: number; x?: number; y?: number; front?: boolean; center?: boolean };
   fill?: string;
   borders?: Partial<Record<'top' | 'right' | 'bottom' | 'left', { w: number; color: string }>>;
   margins?: [number, number, number, number];
@@ -1103,7 +1103,9 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
       if (gapRight >= 1) cells.push({ width: gapRight, children: [{ kind: 'p', runs: [] }], gap: true });
       continue;
     }
-    const vAlign = alignOf(colBox);
+    // Coluna só com desenho (a bola da seta entre dois cards): alinha pelo
+    // desenho, não pela caixa que o embrulha (que tem a altura toda).
+    const vAlign = alignOf(col.length === 1 && !hasText(col[0]) && leaves(col).length ? union(leaves(col)) : colBox);
     // Célula na largura da coluna; o vão até a próxima vira célula vazia
     // (é onde enfeites como a seta entre dois cards voltam).
     const own = i + 1 < cols.length ? Math.max(1, Math.min(width, right(colBox) - start)) : width;
@@ -1359,7 +1361,7 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
       kind: 't',
       width: box.w,
       indent: box.x - region.x,
-      rows: [{ height: box.h, cells: [{ width: box.w, backdrop: { image, w: shot.w, h: shot.h, x: area.x - box.x, front: !texts.length }, children: children.length ? children : [{ kind: 'p', runs: [] }] }] }],
+      rows: [{ height: box.h, cells: [{ width: box.w, backdrop: { image, w: shot.w, h: shot.h, x: area.x - box.x, front: !texts.length, center: !texts.length }, children: children.length ? children : [{ kind: 'p', runs: [] }] }] }],
     },
   ];
 };
@@ -1462,7 +1464,13 @@ const toParagraph = (p: PIR): Paragraph => {
 };
 
 /** Parágrafo mínimo no topo da célula segurando a arte de fundo (atrás do texto, dentro da célula). */
-const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean): Paragraph =>
+/**
+ * `centered`: a célula é centralizada na vertical e a âncora é o único
+ * parágrafo dela — fica no meio da célula, e a arte (metade pra cima, metade
+ * pra baixo) acompanha quando a linha cresce (a bola com a seta entre dois
+ * cards continua no meio deles, como no Studio).
+ */
+const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean, centered = false): Paragraph =>
   new Paragraph({
     keepNext: keepNext || undefined,
     spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
@@ -1473,7 +1481,7 @@ const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean
         transformation: { width: Math.round(b.w), height: Math.round(b.h) },
         floating: {
           horizontalPosition: { relative: HorizontalPositionRelativeFrom.COLUMN, offset: emu(b.x ?? 0) },
-          verticalPosition: { relative: VerticalPositionRelativeFrom.PARAGRAPH, offset: emu(b.y ?? 0) },
+          verticalPosition: { relative: VerticalPositionRelativeFrom.PARAGRAPH, offset: emu(centered ? -b.h / 2 + 1 : b.y ?? 0) },
           // Sem texto por cima (a bola entre dois cards): na frente — atrás, o
           // sombreamento das células vizinhas cobria.
           behindDocument: !b.front,
@@ -1547,7 +1555,8 @@ const toTable = (t: TIR): Table => {
             // posicionava o conteúdo no Studio deslocava de novo (logo baixo).
             // Com arte de fundo, não: a arte é ancorada no primeiro parágrafo e
             // a centralização a levaria junto — posições do Studio, pelo topo.
-            const centered = cell.vAlign === 'center' && !cell.backdrop;
+            const artCentered = Boolean(cell.backdrop?.center) && cell.vAlign === 'center';
+            const centered = cell.vAlign === 'center' && (!cell.backdrop || artCentered);
             const [mt, , mb] = centered ? [0, 0, 0] : cell.margins ?? [0, 0, 0, 0];
             let items = cell.children;
             if (centered) {
@@ -1568,7 +1577,10 @@ const toTable = (t: TIR): Table => {
             const children = toBlocks(items);
             // A âncora segue o "manter com o próximo" da célula (o Word olha todos os parágrafos da linha).
             const keep = allParagraphs(cell.children).some((p) => p.keepNext);
-            if (cell.backdrop) children.unshift(backdropParagraph(cell.backdrop, keep));
+            // Arte centralizada sem texto: a âncora é o único parágrafo (senão o
+            // parágrafo vazio de baixo deslocaria o centro).
+            if (artCentered && items.every((k) => k.kind === 'p' && !k.runs.length && !k.bookmark)) children.splice(0, children.length);
+            if (cell.backdrop) children.unshift(backdropParagraph(cell.backdrop, keep, artCentered));
             // Célula tem que terminar em parágrafo.
             if (!children.length || children[children.length - 1] instanceof Table) children.push(toParagraph(spacer(0.5)));
             return new TableCell({
@@ -1579,7 +1591,7 @@ const toTable = (t: TIR): Table => {
               margins: cell.margins
                 ? { top: 0, right: tw(cell.margins[1]), bottom: 0, left: tw(cell.margins[3]), marginUnitType: WidthType.DXA }
                 : undefined,
-              verticalAlign: cell.vAlign === 'center' && !cell.backdrop ? VerticalAlign.CENTER : cell.vAlign === 'bottom' ? VerticalAlign.BOTTOM : VerticalAlign.TOP,
+              verticalAlign: cell.vAlign === 'center' && (!cell.backdrop || (cell.backdrop.center && cell.vAlign === 'center')) ? VerticalAlign.CENTER : cell.vAlign === 'bottom' ? VerticalAlign.BOTTOM : VerticalAlign.TOP,
               borders: {
                 top: border(cell.borders?.top), bottom: border(cell.borders?.bottom), left: border(cell.borders?.left), right: border(cell.borders?.right),
               },
