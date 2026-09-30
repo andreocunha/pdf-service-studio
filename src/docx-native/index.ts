@@ -125,31 +125,56 @@ const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData
   const paint = (id: number) => capture(id, 'alone');
   const backdrop = (id: number, clip: Box) => capture(id, 'notext', clip);
   /**
-   * Cor média do fundo da página sob uma área, em hex: captura a área com o
-   * conteúdo da página escondido (só o fundo) e tira a média no próprio
-   * Chromium (a imagem de fundo vem de outra origem — ler direto é bloqueado).
+   * Cor média do fundo da página sob uma área, em hex. O fundo de cada página
+   * é capturado UMA vez (conteúdo escondido, só o fundo) e fica num canvas na
+   * própria página; cada bloco só tira a média da região dele. Capturar por
+   * bloco (260 na Caixa) levava minutos no servidor de produção.
    */
+  const sampled = new Map<number, Promise<boolean>>();
   const under = async (_url: string, pageBox: Box, area: Box): Promise<string | null> => {
-    const clip = { x: area.x, y: area.y, width: Math.max(1, area.w), height: Math.max(1, area.h) };
-    await page.evaluate(`(() => {
-      const pg = [...document.querySelectorAll('[data-page-index]')].find((p) => { const r = p.getBoundingClientRect(); return Math.abs(r.top + scrollY - ${pageBox.y}) < 2; });
-      if (!pg) return;
-      for (const e of pg.querySelectorAll('*')) { if (!e.hasAttribute('data-dx-vis')) e.setAttribute('data-dx-vis', e.style.visibility); e.style.visibility = 'hidden'; }
-    })()`);
-    try {
-      const png = Buffer.from(await page.screenshot({ type: 'png', clip, captureBeyondViewport: true })).toString('base64');
-      return (await page.evaluate(`(async () => {
-        const bmp = await createImageBitmap(await (await fetch('data:image/png;base64,${png}')).blob());
-        const c = new OffscreenCanvas(1, 1).getContext('2d');
-        c.drawImage(bmp, 0, 0, bmp.width, bmp.height, 0, 0, 1, 1);
-        const [r, g, b] = c.getImageData(0, 0, 1, 1).data;
-        return [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
-      })()`)) as string;
-    } catch {
-      return null;
-    } finally {
-      await page.evaluate(`(() => { for (const e of document.querySelectorAll('[data-dx-vis]')) { e.style.visibility = e.getAttribute('data-dx-vis'); e.removeAttribute('data-dx-vis'); } })()`);
+    const key = Math.round(pageBox.y);
+    let ready = sampled.get(key);
+    if (!ready) {
+      ready = (async () => {
+        await page.evaluate(`(() => {
+          const pg = [...document.querySelectorAll('[data-page-index]')].find((p) => Math.abs(p.getBoundingClientRect().top + scrollY - ${pageBox.y}) < 2);
+          if (!pg) return;
+          for (const e of pg.querySelectorAll('*')) { if (!e.hasAttribute('data-dx-vis')) e.setAttribute('data-dx-vis', e.style.visibility); e.style.visibility = 'hidden'; }
+        })()`);
+        try {
+          const png = Buffer.from(
+            await page.screenshot({ type: 'png', captureBeyondViewport: true, clip: { x: pageBox.x, y: pageBox.y, width: pageBox.w, height: pageBox.h } }),
+          ).toString('base64');
+          return (await page.evaluate(`(async () => {
+            const bmp = await createImageBitmap(await (await fetch('data:image/png;base64,${png}')).blob());
+            const c = new OffscreenCanvas(bmp.width, bmp.height);
+            c.getContext('2d', { willReadFrequently: true }).drawImage(bmp, 0, 0);
+            (window.__dxBg ??= {})[${key}] = { c, k: bmp.width / ${pageBox.w} };
+            return true;
+          })()`)) as boolean;
+        } catch {
+          return false;
+        } finally {
+          await page.evaluate(`(() => { for (const e of document.querySelectorAll('[data-dx-vis]')) { e.style.visibility = e.getAttribute('data-dx-vis'); e.removeAttribute('data-dx-vis'); } })()`);
+        }
+      })();
+      sampled.set(key, ready);
     }
+    if (!(await ready)) return null;
+    return (await page.evaluate(`(() => {
+      const bg = window.__dxBg?.[${key}];
+      if (!bg) return null;
+      const x = Math.max(0, Math.floor((${area.x} - ${pageBox.x}) * bg.k));
+      const y = Math.max(0, Math.floor((${area.y} - ${pageBox.y}) * bg.k));
+      const w = Math.max(1, Math.min(bg.c.width - x, Math.ceil(${area.w} * bg.k)));
+      const h = Math.max(1, Math.min(bg.c.height - y, Math.ceil(${area.h} * bg.k)));
+      if (w < 1 || h < 1) return null;
+      const d = bg.c.getContext('2d').getImageData(x, y, w, h).data;
+      let r = 0, g = 0, b = 0, n = 0;
+      const step = Math.max(4, Math.floor(d.length / 4 / 4000)) * 4;
+      for (let i = 0; i < d.length; i += step) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+      return [r, g, b].map((v) => Math.round(v / n).toString(16).padStart(2, '0')).join('');
+    })()`)) as string | null;
   };
   return { image, raster, paint, backdrop, under, cache };
 };

@@ -159,6 +159,9 @@ const OFFICE_CONTENT_TYPE: Record<OfficeFormat, string> = {
  */
 const DOCX_FONTS_BUDGET_MS = 20_000;
 
+/** Tempo máximo do Word nativo antes de cair no iLovePDF. */
+const DOCX_NATIVE_BUDGET_MS = Number(process.env.DOCX_NATIVE_BUDGET_MS ?? 90_000);
+
 const withRealFonts = async (docx: Buffer, pdf: Buffer, documentId: string): Promise<Buffer> => {
   const t0 = Date.now();
   let timer: NodeJS.Timeout | undefined;
@@ -204,7 +207,15 @@ const handleOfficeExport = async (
   if (format === 'docx' && config.docxEngine === 'native') {
     const t0 = Date.now();
     try {
-      const { buffer, title } = await renderNativeDocx({ documentId: authed.documentId, workspaceId: authed.workspaceId, appUrl: config.renderBaseUrl });
+      // Limite de tempo: passou disso, entrega o iLovePDF em vez de deixar o
+      // usuário esperando (o nativo continua em segundo plano e é descartado).
+      let timer: NodeJS.Timeout | undefined;
+      const { buffer, title } = await Promise.race([
+        renderNativeDocx({ documentId: authed.documentId, workspaceId: authed.workspaceId, appUrl: config.renderBaseUrl }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`docx native timed out after ${DOCX_NATIVE_BUDGET_MS}ms`)), DOCX_NATIVE_BUDGET_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
       logger.info({ documentId: authed.documentId, elapsedMs: Date.now() - t0, bytes: buffer.length }, 'docx native');
       const clean = cleanTitle(title);
       reply
