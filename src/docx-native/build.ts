@@ -104,7 +104,7 @@ type CellIR = {
   /** Espaço vazio entre colunas (recebe enfeites tirados do corte). */
   gap?: boolean;
   /** Arte atrás do conteúdo (banner com gradiente/ilustração): imagem ancorada na célula, atrás do texto. */
-  backdrop?: { image: ImageData; w: number; h: number; x?: number; y?: number; front?: boolean };
+  backdrop?: { image: ImageData; w: number; h: number; x?: number; y?: number; front?: boolean; center?: boolean };
   fill?: string;
   borders?: Partial<Record<'top' | 'right' | 'bottom' | 'left', { w: number; color: string }>>;
   margins?: [number, number, number, number];
@@ -608,7 +608,7 @@ const growGap = (gap: number, from: PIR): PIR => ({
   keepNext: from.keepNext,
   bookmark: from.bookmark,
   line: { value: Math.max(MIN_LINE, tw(gap)), rule: 'atLeast' },
-  grow: Math.max(2, Math.min(halfPt(gap / 1.25), 20)),
+  grow: Math.max(2, Math.min(144, Math.round((gap / simpleRatio) * 1.5))),
 });
 
 const leaves = (nodes: LayoutNode[]): LayoutNode[] =>
@@ -644,7 +644,9 @@ const nestShapes = (n: LayoutNode): LayoutNode => {
   for (const shape of shapes.sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h)) {
     if (!kids.includes(shape)) continue;
     const inside = kids.filter((k) => k !== shape && k.k !== 'shape' && contains(shape.box, k.box));
-    if (!inside.length) continue;
+    // Só é fundo de card se tem texto em cima. Forma só com ícone (a bola
+    // branca com a seta entre dois cards) é enfeite: vai como desenho.
+    if (!inside.some(hasText)) continue;
     kids = kids.filter((k) => !inside.includes(k) && k !== shape);
     kids.push({
       ...(shape as Extract<LayoutNode, { k: 'shape' }>),
@@ -709,15 +711,17 @@ const union = (items: LayoutNode[]): Box => {
 // Texto
 // ---------------------------------------------------------------------------
 
+/**
+ * Entrelinha automática do Word (a equipe edita em "Simples"): cresce e
+ * encolhe com a fonte. Igual à natural da fonte → Simples; o Studio mais
+ * aberto (1,65 na Caixa) → Múltiplos com o fator que dá a mesma altura. A
+ * altura natural é a do Windows (usWin), onde a equipe e os clientes editam.
+ */
 const lineOf = (para: Para, face: Face | null): PIR['line'] => {
   if (!para.lineHeight) return undefined;
-  // Altura do Studio, em pontos. "Pelo menos" quando cabe a linha natural da
-  // fonte (o texto ainda cresce se aumentarem a fonte no Word); exata quando
-  // o Studio aperta mais que isso. Múltiplo ("auto") não serve: a linha
-  // simples do Word do Mac usa a métrica typo da fonte, a do Windows a win —
-  // na Work Sans 1,17 × 1,45, a entrelinha mudava de máquina pra máquina.
   const natural = (face?.lineHeight ?? 1.2) * para.fontSize;
-  return { value: tw(para.lineHeight), rule: para.lineHeight >= natural - 0.5 ? 'atLeast' : 'exact' };
+  const m = para.lineHeight / natural;
+  return { value: Math.abs(m - 1) < 0.08 ? 240 : Math.round(240 * Math.max(0.8, m)), rule: 'auto' };
 };
 
 /**
@@ -1099,7 +1103,9 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
       if (gapRight >= 1) cells.push({ width: gapRight, children: [{ kind: 'p', runs: [] }], gap: true });
       continue;
     }
-    const vAlign = alignOf(colBox);
+    // Coluna só com desenho (a bola da seta entre dois cards): alinha pelo
+    // desenho, não pela caixa que o embrulha (que tem a altura toda).
+    const vAlign = alignOf(col.length === 1 && !hasText(col[0]) && leaves(col).length ? union(leaves(col)) : colBox);
     // Célula na largura da coluna; o vão até a próxima vira célula vazia
     // (é onde enfeites como a seta entre dois cards voltam).
     const own = i + 1 < cols.length ? Math.max(1, Math.min(width, right(colBox) - start)) : width;
@@ -1355,7 +1361,7 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
       kind: 't',
       width: box.w,
       indent: box.x - region.x,
-      rows: [{ height: box.h, cells: [{ width: box.w, backdrop: { image, w: shot.w, h: shot.h, x: area.x - box.x, front: !texts.length }, children: children.length ? children : [{ kind: 'p', runs: [] }] }] }],
+      rows: [{ height: box.h, cells: [{ width: box.w, backdrop: { image, w: shot.w, h: shot.h, x: area.x - box.x, front: !texts.length, center: !texts.length }, children: children.length ? children : [{ kind: 'p', runs: [] }] }] }],
     },
   ];
 };
@@ -1407,6 +1413,18 @@ const toRuns = (p: PIR): ParagraphChild[] =>
     return [run];
   });
 
+/** Altura em px da linha Simples de uma fonte de 1 meio-ponto no corpo (medida da fonte do Normal). */
+let simpleRatio = 1.2;
+/** Parágrafo sem texto: meio-ponto da fonte cuja linha Simples dá a altura pedida. */
+const structural = (p: PIR): number | undefined => {
+  if (p.runs.some((r) => r.kind === 'text') || p.numbering) return undefined;
+  if (p.tiny) return 2;
+  if (p.grow) return p.grow;
+  if (!p.line || p.line.rule === 'auto') return undefined;
+  const px = p.line.value / 15;
+  return Math.max(2, Math.min(144, Math.round((px / simpleRatio) * 1.5)));
+};
+
 const toParagraph = (p: PIR): Paragraph => {
   if (p.blank) return new Paragraph({ keepNext: p.keepNext || undefined, children: p.bookmark ? [new Bookmark({ id: p.bookmark, children: [] })] : [] });
   const children = toRuns(p);
@@ -1422,7 +1440,9 @@ const toParagraph = (p: PIR): Paragraph => {
     spacing: {
       before: tw(p.spaceBefore ?? 0),
       after: tw(p.spaceAfter ?? 0),
-      ...(p.line ? { line: p.line.value, lineRule: p.line.rule === 'auto' ? LineRuleType.AUTO : p.line.rule === 'atLeast' ? LineRuleType.AT_LEAST : LineRuleType.EXACT } : {}),
+      // Sempre automática (Simples/Múltiplos) — nunca fixa nem "pelo menos".
+      line: p.line?.rule === 'auto' ? p.line.value : 240,
+      lineRule: LineRuleType.AUTO,
     },
     numbering: p.numbering ? { reference: p.numbering.ref, level: p.numbering.level, ...(p.numbering.instance ? { instance: p.numbering.instance } : {}) } : undefined,
     border:
@@ -1434,7 +1454,9 @@ const toParagraph = (p: PIR): Paragraph => {
         : undefined,
     // Espaçador herda a fonte do corpo (Normal) — com a altura exata, não
     // aparece fonte 1 no meio do texto; só o parágrafo de imagem é mínimo.
-    run: p.mark ? runProps(p.mark.run, p.mark.face) : p.tiny ? { size: 2 } : p.grow ? { size: p.grow } : undefined,
+    // Parágrafo sem texto (espaço, âncora de imagem) em Simples: a altura vem
+    // do tamanho da fonte da marca — do tamanho do espaço do Studio.
+    run: p.mark ? runProps(p.mark.run, p.mark.face) : structural(p) !== undefined ? { size: structural(p) } : undefined,
     heading: p.heading ? [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3][p.heading - 1] : undefined,
     keepNext: p.keepNext || undefined,
     shading: p.shade ? { fill: p.shade, color: 'auto', type: 'clear' as never } : undefined,
@@ -1442,10 +1464,16 @@ const toParagraph = (p: PIR): Paragraph => {
 };
 
 /** Parágrafo mínimo no topo da célula segurando a arte de fundo (atrás do texto, dentro da célula). */
-const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean): Paragraph =>
+/**
+ * `centered`: a célula é centralizada na vertical e a âncora é o único
+ * parágrafo dela — fica no meio da célula, e a arte (metade pra cima, metade
+ * pra baixo) acompanha quando a linha cresce (a bola com a seta entre dois
+ * cards continua no meio deles, como no Studio).
+ */
+const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean, centered = false): Paragraph =>
   new Paragraph({
     keepNext: keepNext || undefined,
-    spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT },
+    spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
     run: { size: 2 },
     children: [
       new ImageRun({
@@ -1453,7 +1481,7 @@ const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean
         transformation: { width: Math.round(b.w), height: Math.round(b.h) },
         floating: {
           horizontalPosition: { relative: HorizontalPositionRelativeFrom.COLUMN, offset: emu(b.x ?? 0) },
-          verticalPosition: { relative: VerticalPositionRelativeFrom.PARAGRAPH, offset: emu(b.y ?? 0) },
+          verticalPosition: { relative: VerticalPositionRelativeFrom.PARAGRAPH, offset: emu(centered ? -b.h / 2 + 1 : b.y ?? 0) },
           // Sem texto por cima (a bola entre dois cards): na frente — atrás, o
           // sombreamento das células vizinhas cobria.
           behindDocument: !b.front,
@@ -1527,7 +1555,8 @@ const toTable = (t: TIR): Table => {
             // posicionava o conteúdo no Studio deslocava de novo (logo baixo).
             // Com arte de fundo, não: a arte é ancorada no primeiro parágrafo e
             // a centralização a levaria junto — posições do Studio, pelo topo.
-            const centered = cell.vAlign === 'center' && !cell.backdrop;
+            const artCentered = Boolean(cell.backdrop?.center) && cell.vAlign === 'center';
+            const centered = cell.vAlign === 'center' && (!cell.backdrop || artCentered);
             const [mt, , mb] = centered ? [0, 0, 0] : cell.margins ?? [0, 0, 0, 0];
             let items = cell.children;
             if (centered) {
@@ -1548,7 +1577,10 @@ const toTable = (t: TIR): Table => {
             const children = toBlocks(items);
             // A âncora segue o "manter com o próximo" da célula (o Word olha todos os parágrafos da linha).
             const keep = allParagraphs(cell.children).some((p) => p.keepNext);
-            if (cell.backdrop) children.unshift(backdropParagraph(cell.backdrop, keep));
+            // Arte centralizada sem texto: a âncora é o único parágrafo (senão o
+            // parágrafo vazio de baixo deslocaria o centro).
+            if (artCentered && items.every((k) => k.kind === 'p' && !k.runs.length && !k.bookmark)) children.splice(0, children.length);
+            if (cell.backdrop) children.unshift(backdropParagraph(cell.backdrop, keep, artCentered));
             // Célula tem que terminar em parágrafo.
             if (!children.length || children[children.length - 1] instanceof Table) children.push(toParagraph(spacer(0.5)));
             return new TableCell({
@@ -1559,7 +1591,7 @@ const toTable = (t: TIR): Table => {
               margins: cell.margins
                 ? { top: 0, right: tw(cell.margins[1]), bottom: 0, left: tw(cell.margins[3]), marginUnitType: WidthType.DXA }
                 : undefined,
-              verticalAlign: cell.vAlign === 'center' && !cell.backdrop ? VerticalAlign.CENTER : cell.vAlign === 'bottom' ? VerticalAlign.BOTTOM : VerticalAlign.TOP,
+              verticalAlign: cell.vAlign === 'center' && (!cell.backdrop || (cell.backdrop.center && cell.vAlign === 'center')) ? VerticalAlign.CENTER : cell.vAlign === 'bottom' ? VerticalAlign.BOTTOM : VerticalAlign.TOP,
               borders: {
                 top: border(cell.borders?.top), bottom: border(cell.borders?.bottom), left: border(cell.borders?.left), right: border(cell.borders?.right),
               },
@@ -1586,7 +1618,7 @@ const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: num
   const page = layout.pages[pageIndex];
   const footer = page?.footer;
   // Sem rodapé: parágrafo mínimo — um vazio no estilo Normal ocupava uma linha no pé da capa.
-  if (!footer?.number) return { footer: new Footer({ children: [new Paragraph({ spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT }, children: [] })] }), distance: 0, offsets: null };
+  if (!footer?.number) return { footer: new Footer({ children: [new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] })] }), distance: 0, offsets: null };
   const num = footer.number;
   const [current, total] = num.text.split('/').map((v) => Number(v));
   const offsets = { current: current - (pageIndex + 1), total: total - layout.pages.length };
@@ -1713,6 +1745,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   layout.blocks.forEach((b) => scan(b.tree));
   const [bodyFamily, bodySizeHalf, bodyLinePx] = ([...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'Arial|20|18').split('|');
   const bodyLine = Number(bodyLinePx) || 18;
+  simpleRatio = fonts.resolve(bodyFamily, 400, false)?.lineHeight ?? 1.2;
 
   type SectionIR = {
     gi: number;
@@ -1877,7 +1910,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     const headerBg = bg
       ? new Paragraph({
           // Só segura a âncora do fundo: não pode ocupar altura no cabeçalho.
-          spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT },
+          spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
           run: { size: 2 },
           children: [
             new ImageRun({
@@ -1893,7 +1926,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
             } as never),
           ],
         })
-      : new Paragraph({ spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT }, run: { size: 2 }, children: [] });
+      : new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] });
 
     // Menu de seções no cabeçalho, como tabela, com links pros capítulos.
     let headerDistance = 0;
@@ -1908,7 +1941,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     pageOffsets ??= foot.offsets;
     const headerLogos = logosHere.map(({ image, box }) =>
       new Paragraph({
-        spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT },
+        spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
         run: { size: 2 },
         children: [
           new ImageRun({
@@ -2031,7 +2064,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         // Normal = fonte/tamanho mais usados no documento: texto novo digitado no Word já sai certo.
         document: {
           run: { font: body.font, size: body.size },
-          paragraph: { spacing: { after: 0, line: normalLine.value, lineRule: normalLine.rule === 'exact' ? LineRuleType.EXACT : LineRuleType.AT_LEAST } },
+          paragraph: { spacing: { after: 0, line: normalLine.value, lineRule: LineRuleType.AUTO } },
         },
         // Títulos só marcam a estrutura (navegação, sumário); a aparência vem dos próprios trechos.
         heading1: { run: { font: body.font, size: body.size, color: undefined }, paragraph: { spacing: { before: 0, after: 0 } } },
