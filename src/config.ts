@@ -22,6 +22,12 @@ export const config = {
   requestTimeoutMs: Number(optional('REQUEST_TIMEOUT_MS', '30000')),
   pdfPrintTimeoutMs: Number(optional('PDF_PRINT_TIMEOUT_MS', '120000')),
   isProduction: process.env.NODE_ENV === 'production',
+  /**
+   * Motor do Word (/docx). 'native' (padrão): montado do layout do Studio no
+   * padrão da Lex (src/docx-native), com o iLovePDF de reserva se falhar.
+   * 'ilovepdf': a conversão antiga do PDF. Voltar é só trocar a env.
+   */
+  docxEngine: optional('DOCX_ENGINE', 'native') as 'native' | 'ilovepdf',
 } as const;
 
 export type Config = typeof config;

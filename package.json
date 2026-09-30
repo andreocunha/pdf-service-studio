@@ -9,7 +9,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').cpSync('src/docx-native/extract.js', 'dist/docx-native/extract.js')\"",
     "start": "node dist/server.js",
     "dev": "tsx watch --env-file=.env src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -26,6 +26,7 @@
     "@fastify/rate-limit": "^10.1.1",
     "@sparticuz/chromium": "147.0.0",
     "@supabase/supabase-js": "^2.48.0",
+    "docx": "^9.8.1",
     "fastify": "^5.2.1",
     "fflate": "^0.8.3",
     "pdf-lib": "^1.17.1",

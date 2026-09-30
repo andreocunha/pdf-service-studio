@@ -7,7 +7,7 @@ import { logger } from './logger.js';
 import { signRenderToken } from './signing.js';
 import { preparePdfMasks } from './pdf-masks.js';
 
-type RenderMeta = {
+export type RenderMeta = {
   pageWidthPx: number;
   pageHeightPx: number;
   paddingTopPx?: number;
@@ -57,11 +57,17 @@ const waitForReady = async (
   return { meta, fonts };
 };
 
-export const renderDocumentPdf = async (args: {
-  documentId: string;
-  workspaceId: string;
-}): Promise<{ buffer: Buffer; title: string; fonts: UsedFont[] }> => {
-  const start = Date.now();
+export type RenderedPage = { page: Page; meta: RenderMeta; fonts: UsedFont[] };
+
+/**
+ * Abre /render-pdf/:id, espera o documento assentar (fontes, imagens, largura
+ * real da página) e entrega a página pronta. Mesmo preparo pro PDF e pro
+ * Word nativo — os dois leem exatamente o mesmo layout.
+ */
+export const withRenderPage = async <T>(
+  args: { documentId: string; workspaceId: string },
+  fn: (rendered: RenderedPage) => Promise<T>,
+): Promise<T> => {
   const token = signRenderToken(args.documentId, args.workspaceId);
   const url = `${config.renderBaseUrl}/render-pdf/${encodeURIComponent(args.documentId)}?t=${encodeURIComponent(token)}`;
 
@@ -170,6 +176,18 @@ export const renderDocumentPdf = async (args: {
       );
     }
 
+    return await fn({ page, meta, fonts });
+  } finally {
+    await page.close().catch(() => undefined);
+  }
+};
+
+export const renderDocumentPdf = async (args: {
+  documentId: string;
+  workspaceId: string;
+}): Promise<{ buffer: Buffer; title: string; fonts: UsedFont[] }> => {
+  const start = Date.now();
+  return withRenderPage(args, async ({ page, meta, fonts }) => {
     const preparedMasks = await preparePdfMasks(page);
     const widthIn = meta.pageWidthPx * PX_TO_IN;
     const heightIn = meta.pageHeightPx * PX_TO_IN;
@@ -206,7 +224,5 @@ export const renderDocumentPdf = async (args: {
       title: meta.title ?? 'document',
       fonts,
     };
-  } finally {
-    await page.close().catch(() => undefined);
-  }
+  });
 };
