@@ -608,7 +608,7 @@ const growGap = (gap: number, from: PIR): PIR => ({
   keepNext: from.keepNext,
   bookmark: from.bookmark,
   line: { value: Math.max(MIN_LINE, tw(gap)), rule: 'atLeast' },
-  grow: Math.max(2, Math.min(halfPt(gap / 1.25), 20)),
+  grow: Math.max(2, Math.min(144, Math.round((gap / simpleRatio) * 1.5))),
 });
 
 const leaves = (nodes: LayoutNode[]): LayoutNode[] =>
@@ -644,7 +644,9 @@ const nestShapes = (n: LayoutNode): LayoutNode => {
   for (const shape of shapes.sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h)) {
     if (!kids.includes(shape)) continue;
     const inside = kids.filter((k) => k !== shape && k.k !== 'shape' && contains(shape.box, k.box));
-    if (!inside.length) continue;
+    // Só é fundo de card se tem texto em cima. Forma só com ícone (a bola
+    // branca com a seta entre dois cards) é enfeite: vai como desenho.
+    if (!inside.some(hasText)) continue;
     kids = kids.filter((k) => !inside.includes(k) && k !== shape);
     kids.push({
       ...(shape as Extract<LayoutNode, { k: 'shape' }>),
@@ -709,15 +711,17 @@ const union = (items: LayoutNode[]): Box => {
 // Texto
 // ---------------------------------------------------------------------------
 
+/**
+ * Entrelinha automática do Word (a equipe edita em "Simples"): cresce e
+ * encolhe com a fonte. Igual à natural da fonte → Simples; o Studio mais
+ * aberto (1,65 na Caixa) → Múltiplos com o fator que dá a mesma altura. A
+ * altura natural é a do Windows (usWin), onde a equipe e os clientes editam.
+ */
 const lineOf = (para: Para, face: Face | null): PIR['line'] => {
   if (!para.lineHeight) return undefined;
-  // Altura do Studio, em pontos. "Pelo menos" quando cabe a linha natural da
-  // fonte (o texto ainda cresce se aumentarem a fonte no Word); exata quando
-  // o Studio aperta mais que isso. Múltiplo ("auto") não serve: a linha
-  // simples do Word do Mac usa a métrica typo da fonte, a do Windows a win —
-  // na Work Sans 1,17 × 1,45, a entrelinha mudava de máquina pra máquina.
   const natural = (face?.lineHeight ?? 1.2) * para.fontSize;
-  return { value: tw(para.lineHeight), rule: para.lineHeight >= natural - 0.5 ? 'atLeast' : 'exact' };
+  const m = para.lineHeight / natural;
+  return { value: Math.abs(m - 1) < 0.08 ? 240 : Math.round(240 * Math.max(0.8, m)), rule: 'auto' };
 };
 
 /**
@@ -1407,6 +1411,18 @@ const toRuns = (p: PIR): ParagraphChild[] =>
     return [run];
   });
 
+/** Altura em px da linha Simples de uma fonte de 1 meio-ponto no corpo (medida da fonte do Normal). */
+let simpleRatio = 1.2;
+/** Parágrafo sem texto: meio-ponto da fonte cuja linha Simples dá a altura pedida. */
+const structural = (p: PIR): number | undefined => {
+  if (p.runs.some((r) => r.kind === 'text') || p.numbering) return undefined;
+  if (p.tiny) return 2;
+  if (p.grow) return p.grow;
+  if (!p.line || p.line.rule === 'auto') return undefined;
+  const px = p.line.value / 15;
+  return Math.max(2, Math.min(144, Math.round((px / simpleRatio) * 1.5)));
+};
+
 const toParagraph = (p: PIR): Paragraph => {
   if (p.blank) return new Paragraph({ keepNext: p.keepNext || undefined, children: p.bookmark ? [new Bookmark({ id: p.bookmark, children: [] })] : [] });
   const children = toRuns(p);
@@ -1422,7 +1438,9 @@ const toParagraph = (p: PIR): Paragraph => {
     spacing: {
       before: tw(p.spaceBefore ?? 0),
       after: tw(p.spaceAfter ?? 0),
-      ...(p.line ? { line: p.line.value, lineRule: p.line.rule === 'auto' ? LineRuleType.AUTO : p.line.rule === 'atLeast' ? LineRuleType.AT_LEAST : LineRuleType.EXACT } : {}),
+      // Sempre automática (Simples/Múltiplos) — nunca fixa nem "pelo menos".
+      line: p.line?.rule === 'auto' ? p.line.value : 240,
+      lineRule: LineRuleType.AUTO,
     },
     numbering: p.numbering ? { reference: p.numbering.ref, level: p.numbering.level, ...(p.numbering.instance ? { instance: p.numbering.instance } : {}) } : undefined,
     border:
@@ -1434,7 +1452,9 @@ const toParagraph = (p: PIR): Paragraph => {
         : undefined,
     // Espaçador herda a fonte do corpo (Normal) — com a altura exata, não
     // aparece fonte 1 no meio do texto; só o parágrafo de imagem é mínimo.
-    run: p.mark ? runProps(p.mark.run, p.mark.face) : p.tiny ? { size: 2 } : p.grow ? { size: p.grow } : undefined,
+    // Parágrafo sem texto (espaço, âncora de imagem) em Simples: a altura vem
+    // do tamanho da fonte da marca — do tamanho do espaço do Studio.
+    run: p.mark ? runProps(p.mark.run, p.mark.face) : structural(p) !== undefined ? { size: structural(p) } : undefined,
     heading: p.heading ? [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3][p.heading - 1] : undefined,
     keepNext: p.keepNext || undefined,
     shading: p.shade ? { fill: p.shade, color: 'auto', type: 'clear' as never } : undefined,
@@ -1445,7 +1465,7 @@ const toParagraph = (p: PIR): Paragraph => {
 const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean): Paragraph =>
   new Paragraph({
     keepNext: keepNext || undefined,
-    spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT },
+    spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
     run: { size: 2 },
     children: [
       new ImageRun({
@@ -1586,7 +1606,7 @@ const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: num
   const page = layout.pages[pageIndex];
   const footer = page?.footer;
   // Sem rodapé: parágrafo mínimo — um vazio no estilo Normal ocupava uma linha no pé da capa.
-  if (!footer?.number) return { footer: new Footer({ children: [new Paragraph({ spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT }, children: [] })] }), distance: 0, offsets: null };
+  if (!footer?.number) return { footer: new Footer({ children: [new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] })] }), distance: 0, offsets: null };
   const num = footer.number;
   const [current, total] = num.text.split('/').map((v) => Number(v));
   const offsets = { current: current - (pageIndex + 1), total: total - layout.pages.length };
@@ -1713,6 +1733,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   layout.blocks.forEach((b) => scan(b.tree));
   const [bodyFamily, bodySizeHalf, bodyLinePx] = ([...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'Arial|20|18').split('|');
   const bodyLine = Number(bodyLinePx) || 18;
+  simpleRatio = fonts.resolve(bodyFamily, 400, false)?.lineHeight ?? 1.2;
 
   type SectionIR = {
     gi: number;
@@ -1877,7 +1898,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     const headerBg = bg
       ? new Paragraph({
           // Só segura a âncora do fundo: não pode ocupar altura no cabeçalho.
-          spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT },
+          spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
           run: { size: 2 },
           children: [
             new ImageRun({
@@ -1893,7 +1914,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
             } as never),
           ],
         })
-      : new Paragraph({ spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT }, run: { size: 2 }, children: [] });
+      : new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] });
 
     // Menu de seções no cabeçalho, como tabela, com links pros capítulos.
     let headerDistance = 0;
@@ -1908,7 +1929,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     pageOffsets ??= foot.offsets;
     const headerLogos = logosHere.map(({ image, box }) =>
       new Paragraph({
-        spacing: { before: 0, after: 0, line: MIN_LINE, lineRule: LineRuleType.EXACT },
+        spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
         run: { size: 2 },
         children: [
           new ImageRun({
@@ -2031,7 +2052,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         // Normal = fonte/tamanho mais usados no documento: texto novo digitado no Word já sai certo.
         document: {
           run: { font: body.font, size: body.size },
-          paragraph: { spacing: { after: 0, line: normalLine.value, lineRule: normalLine.rule === 'exact' ? LineRuleType.EXACT : LineRuleType.AT_LEAST } },
+          paragraph: { spacing: { after: 0, line: normalLine.value, lineRule: LineRuleType.AUTO } },
         },
         // Títulos só marcam a estrutura (navegação, sumário); a aparência vem dos próprios trechos.
         heading1: { run: { font: body.font, size: body.size, color: undefined }, paragraph: { spacing: { before: 0, after: 0 } } },
