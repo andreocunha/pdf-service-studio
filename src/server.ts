@@ -11,6 +11,7 @@ import type { IlovepdfTask, OfficeFormat } from './ilovepdf.js';
 import { HttpError } from './errors.js';
 import { logger } from './logger.js';
 import { renderDocumentPdf } from './render.js';
+import { renderNativeDocx } from './docx-native/index.js';
 import { finalizePdfDownload } from './pdf-download.js';
 import { serviceClient } from './supabase.js';
 
@@ -197,6 +198,26 @@ const handleOfficeExport = async (
     authorization: typeof authorization === 'string' ? authorization : undefined,
     apiKey: typeof apiKey === 'string' ? apiKey : undefined,
   });
+
+  // Word nativo (padrão): montado do layout do Studio. Qualquer falha cai na
+  // conversão do iLovePDF abaixo — o download nunca fica sem arquivo.
+  if (format === 'docx' && config.docxEngine === 'native') {
+    const t0 = Date.now();
+    try {
+      const { buffer, title } = await renderNativeDocx({ documentId: authed.documentId, workspaceId: authed.workspaceId, appUrl: config.renderBaseUrl });
+      logger.info({ documentId: authed.documentId, elapsedMs: Date.now() - t0, bytes: buffer.length }, 'docx native');
+      const clean = cleanTitle(title);
+      reply
+        .code(200)
+        .header('Content-Type', OFFICE_CONTENT_TYPE.docx)
+        .header('Content-Disposition', dispositionFor(clean, 'docx'))
+        .header('Cache-Control', 'no-store')
+        .send(buffer);
+      return;
+    } catch (err) {
+      logger.warn({ documentId: authed.documentId, err, elapsedMs: Date.now() - t0 }, 'docx native failed — falling back to iLovePDF');
+    }
+  }
 
   // Start the ilovepdf task concurrently with PDF rendering to save ~800ms.
   const [{ buffer: pdfBuffer, title }, ilovepdfTask] = await Promise.all([

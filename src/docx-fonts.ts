@@ -29,18 +29,23 @@ import { brotliDecompressSync } from 'node:zlib';
 
 import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from 'fflate';
 
-type Face = {
+export type Face = {
   family: string;
   bold: boolean;
   italic: boolean;
   lineHeight: number;
   file?: string;
+  /** Peso e estilo do desenho (a família do Word já não diz: "CAIXA Std Bold" não é negrito). */
+  weight?: number;
+  style?: 'italic' | 'normal';
+  /** Arquivo de public/fonts de onde a face saiu ("caixa-std/CAIXA_Std-Bold.woff2"). */
+  source?: string;
   /** Instância de fonte variável: arquivo de origem e FontBBox (milésimos de em). */
   variable?: string;
   bbox?: number[];
 };
 
-type FontData = {
+export type FontData = {
   baseUrl: string;
   faces: Record<string, Face>;
   metrics: Map<Face, Record<string, number>>;
@@ -70,7 +75,7 @@ const unbrotli = (buf: Buffer): Buffer => {
 };
 
 let fontData: { data: FontData; at: number } | null = null;
-const loadFonts = async (baseUrl: string): Promise<FontData> => {
+export const loadFonts = async (baseUrl: string): Promise<FontData> => {
   if (fontData && fontData.data.baseUrl === baseUrl && Date.now() - fontData.at < MANIFEST_TTL_MS) return fontData.data;
   try {
     const [manifest, metricsBr] = await Promise.all([
@@ -846,7 +851,7 @@ const obfuscate = (ttf: Buffer, guid: string): Uint8Array => {
   return out;
 };
 
-const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string): Promise<void> => {
+export const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string): Promise<void> => {
   const byFamily = new Map<string, Face[]>();
   for (const face of used) {
     if (!face.file) continue;
@@ -862,7 +867,9 @@ const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string): Pr
     }),
   );
 
-  let fontTable = strFromU8(files['word/fontTable.xml'] as Uint8Array);
+  // Raiz autofechada (<w:fonts .../>, como a lib docx gera) não tem onde inserir.
+  const opened = (xml: string, tag: string) => xml.replace(new RegExp(`<${tag}(\\s[^>]*)?/>`), `<${tag}$1></${tag}>`);
+  let fontTable = opened(strFromU8(files['word/fontTable.xml'] as Uint8Array), 'w:fonts');
   const rels: string[] = [];
   let n = 0;
   for (const [family, faces] of byFamily) {
@@ -899,7 +906,7 @@ const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string): Pr
 
   const relsPath = 'word/_rels/fontTable.xml.rels';
   const existing = files[relsPath]
-    ? strFromU8(files[relsPath] as Uint8Array)
+    ? opened(strFromU8(files[relsPath] as Uint8Array), 'Relationships')
     : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
   files[relsPath] = strToU8(existing.replace('</Relationships>', `${rels.join('')}</Relationships>`));
 
