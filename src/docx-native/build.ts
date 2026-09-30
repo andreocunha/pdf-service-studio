@@ -721,7 +721,9 @@ const lineOf = (para: Para, face: Face | null): PIR['line'] => {
   if (!para.lineHeight) return undefined;
   const natural = (face?.lineHeight ?? 1.2) * para.fontSize;
   const m = para.lineHeight / natural;
-  return { value: Math.abs(m - 1) < 0.08 ? 240 : Math.round(240 * Math.max(0.8, m)), rule: 'auto' };
+  // Menor que a natural: Simples. Múltiplos abaixo de 1 o Word corta o espaço
+  // de cima da linha e o texto sobe (o "15" do calendário saía do lugar).
+  return { value: m < 1.08 ? 240 : Math.round(240 * m), rule: 'auto' };
 };
 
 /**
@@ -845,6 +847,20 @@ const manualClause = (node: Extract<LayoutNode, { k: 'text' }>, p: PIR, ctx: Ctx
   return true;
 };
 
+/**
+ * Linha única com entrelinha do Studio maior que a da fonte ("15" de 24px
+ * numa linha de 54px): o navegador divide a sobra metade em cima, metade
+ * embaixo; em Múltiplos o Word põe toda embaixo e o texto sobe. Então:
+ * Simples + a sobra como espaço antes/depois. Texto de várias linhas segue
+ * em Múltiplos (a sobra também vai entre as linhas).
+ */
+const oneLineSpacing = (para: Para, face: Face | null, wrapped: boolean): Pick<PIR, 'line' | 'spaceBefore' | 'spaceAfter'> => {
+  const line = lineOf(para, face);
+  if (wrapped || !line || line.value <= 240 || !para.lineHeight || para.runs.some((r) => r.br)) return { line };
+  const half = (para.lineHeight - (face?.lineHeight ?? 1.2) * para.fontSize) / 2;
+  return { line: { value: 240, rule: 'auto' }, spaceBefore: half, spaceAfter: half };
+};
+
 const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box, ctx: Ctx): PIR[] => {
   const out: PIR[] = [];
   const indentLeft = node.box.x - region.x;
@@ -891,7 +907,7 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
       // Marcador pendurado fora do item (lista sem padding): ~1 em antes do texto.
       hanging: para.list && para.x !== undefined ? Math.max(0, Math.min((para.indent ?? 0) >= 4 ? para.indent! : para.fontSize * 1.1, para.x - region.x)) : undefined,
       indentRight: oneLine(para.align)?.right ?? indentRight,
-      line: lineOf(para, firstFace),
+      ...oneLineSpacing(para, firstFace, wrapped),
       mark: first ? { run: first, face: firstFace } : undefined,
       numbering: para.list ? { ref: para.list.kind === 'bullet' ? 'bullet' : 'decimal', level: Math.min(para.list.level, 8) } : undefined,
     });
