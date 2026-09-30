@@ -127,8 +127,6 @@ export type Assets = {
   paint: (id: number) => Promise<ImageData | null>;
   /** Tudo do elemento menos o texto (bloco complexo). */
   backdrop: (id: number, clip: Box) => Promise<ImageData | null>;
-  /** Cor média da imagem de fundo da página sob uma área. */
-  under: (url: string, page: Box, area: Box) => Promise<string | null>;
 };
 
 type Ctx = {
@@ -1779,7 +1777,8 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         const page = layout.pages[block.page];
         // Fundo branco sobre página branca não é fundo (vira texto solto, não
         // tabela). Página com imagem de fundo: vale a cor da imagem ali embaixo.
-        const pageColor = page?.bgImage ? await ctx.assets.under(page.bgImage, page.box, extent(block.tree!)) : page?.bgColor ?? 'ffffff';
+        // Só página de cor lisa: fundo em imagem vai como foi salvo, sem adivinhar cor.
+        const pageColor = page?.bgImage ? null : page?.bgColor ?? 'ffffff';
         let tree = nestShapes(pageColor ? stripSame(block.tree!, pageColor) : block.tree!);
         // Logo solto no topo da primeira página da seção (Sumário, Quadro
         // resumo): vai pro cabeçalho; o título fica como texto na página.
