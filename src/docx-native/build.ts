@@ -529,7 +529,10 @@ const near = (a: string, b: string) => rgb(a).every((v, i) => Math.abs(v - rgb(b
 const stripSame = (n: LayoutNode, page: string): LayoutNode => {
   if (n.k !== 'box' && n.k !== 'text' && n.k !== 'shape') return n;
   const fill = (n as { fill?: string }).fill;
-  const plain = fill && near(fill, page) && !(n as { border?: object }).border && !(n as { paint?: boolean }).paint;
+  // Só o preenchimento sai (a borda fica): fundo da cor da página não se vê, e
+  // sombreamento de célula cobre a arte atrás do texto (a linha do tempo
+  // dentro de um quadro branco com borda sumia).
+  const plain = fill && near(fill, page) && !(n as { paint?: boolean }).paint;
   const copy = plain ? { ...n, fill: undefined } : { ...n };
   // Dentro de uma caixa pintada o que está embaixo já não é a página: o selo
   // branco em cima do card colorido continua branco.
@@ -657,6 +660,69 @@ const nestShapes = (n: LayoutNode): LayoutNode => {
       layout: { display: 'block', dir: 'row', alignItems: 'normal', justify: 'normal', textAlign: 'left' },
     } as LayoutNode);
   }
+  return { ...n, kids };
+};
+
+/**
+ * SVG que é só um retângulo (cantos arredondados ou não) de cor lisa — fundo
+ * exportado do Figma como imagem (o selo do número e a faixa do título do
+ * capítulo). Devolve a cor: vira preenchimento de célula, como a equipe
+ * monta, em vez de arte atrás do texto (que desalinha no Word).
+ */
+const solidRect = (svg: Buffer): string | null => {
+  const src = svg.toString('utf8');
+  if (src.length > 4000 || /<(image|text|linearGradient|radialGradient|pattern|mask|filter|clipPath|use)\b/i.test(src)) return null;
+  const shapes = [...src.matchAll(/<(path|rect|circle|ellipse|polygon|polyline|line)\b([^>]*)>/gi)];
+  if (shapes.length !== 1) return null;
+  const [, tag, attrs] = shapes[0];
+  const fill = attrs.match(/fill="#([0-9a-f]{6})"/i)?.[1];
+  if (!fill || /stroke="(?!none)/i.test(attrs) || /opacity="0?\.\d/i.test(attrs)) return null;
+  const vb = src.match(/viewBox="\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)/);
+  if (!vb) return null;
+  const [W, H] = [Number(vb[1]), Number(vb[2])];
+  if (tag.toLowerCase() === 'rect') {
+    const n = (k: string) => Number(attrs.match(new RegExp(`\\b${k}="([\\d.]+)"`))?.[1] ?? NaN);
+    return n('width') >= W * 0.95 && n('height') >= H * 0.95 ? fill.toLowerCase() : null;
+  }
+  if (tag.toLowerCase() !== 'path') return null;
+  const d = attrs.match(/\bd="([^"]+)"/)?.[1] ?? '';
+  // Retângulo (arredondado): poucos segmentos, pelo menos dois retos, no
+  // máximo quatro curvas (os cantos), cobrindo a área toda. Círculo e ícone não passam.
+  const cmds = d.match(/[a-z]/gi) ?? [];
+  const curves = cmds.filter((c) => /[csqa]/i.test(c)).length;
+  const straight = cmds.filter((c) => /[hvl]/i.test(c)).length;
+  if (cmds.length > 16 || curves > 4 || straight < 2) return null;
+  if (/[mlhvcsqaz]/.test(d)) return null; // comandos relativos: sem medir com segurança
+  // Pontos do contorno (absolutos): H/V levam uma coordenada, o resto pares.
+  const xs: number[] = [];
+  const ys: number[] = [];
+  let cx = 0;
+  let cy = 0;
+  for (const [, c, args] of d.matchAll(/([MLHVCSQTAZ])([^MLHVCSQTAZ]*)/g)) {
+    const v = (args.match(/-?[\d.]+(?:e-?\d+)?/gi) ?? []).map(Number);
+    if (c === 'H') v.forEach((x) => xs.push((cx = x)));
+    else if (c === 'V') v.forEach((y) => ys.push((cy = y)));
+    else if (c === 'A') return null;
+    else for (let i = 0; i + 1 < v.length; i += 2) { xs.push((cx = v[i])); ys.push((cy = v[i + 1])); }
+  }
+  void cx; void cy;
+  if (!xs.length || !ys.length) return null;
+  const spanX = Math.max(...xs) - Math.min(...xs);
+  const spanY = Math.max(...ys) - Math.min(...ys);
+  return spanX >= W * 0.9 && spanY >= H * 0.9 ? fill.toLowerCase() : null;
+};
+
+/** Troca imagens que são só um retângulo de cor por forma com preenchimento. */
+const solidify = async (n: LayoutNode, ctx: Ctx): Promise<LayoutNode> => {
+  if (n.k === 'img') {
+    const image = await ctx.assets.image(n.src, n.box.w, n.box.h);
+    const fill = image?.svg ? solidRect(image.svg) : null;
+    return fill ? ({ k: 'shape', id: n.id, box: n.box, fill, abs: n.abs } as LayoutNode) : n;
+  }
+  if (n.k !== 'box') return n;
+  const kids = await Promise.all(n.kids.map((k) => solidify(k, ctx)));
+  // Caixa que só embrulhava a imagem: assume a forma (a posição é a dela).
+  if (kids.length === 1 && kids[0].k === 'shape' && !decorated(n)) return { ...kids[0], box: n.box, abs: n.abs || kids[0].abs };
   return { ...n, kids };
 };
 
@@ -1375,6 +1441,11 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
   }
   // Colunas primeiro: cada coluna de texto flui sozinha — fatiar por linhas
   // amarrava a altura de uma coluna na outra e desalinhava do desenho.
+  // Texto em cima do desenho? Se não (rótulos embaixo dos ícones da linha do
+  // tempo), a arte vai na frente: atrás, o sombreamento de uma célula em volta
+  // (quadro branco) a cobriria. A captura é transparente fora do desenho.
+  const art = all.filter((n) => n.k === 'img' || n.k === 'raster' || n.k === 'shape');
+  const textOverArt = texts.some((t) => art.some((a) => overlaps(t.box, a.box)));
   // A tabela fica no lugar do fluxo; o desenho que vaza pros lados (a bola
   // entre dois cards, numa coluna de 24px) vai deslocado na âncora — tabela
   // não passa da célula, imagem flutuante passa.
@@ -1387,7 +1458,7 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
       kind: 't',
       width: box.w,
       indent: box.x - region.x,
-      rows: [{ height: box.h, cells: [{ width: box.w, backdrop: { image, w: shot.w, h: shot.h, x: area.x - box.x, front: !texts.length, center: !texts.length }, children: children.length ? children : [{ kind: 'p', runs: [] }] }] }],
+      rows: [{ height: box.h, cells: [{ width: box.w, backdrop: { image, w: shot.w, h: shot.h, x: area.x - box.x, front: !texts.length || !textOverArt, center: !texts.length }, children: children.length ? children : [{ kind: 'p', runs: [] }] }] }],
     },
   ];
 };
@@ -1840,7 +1911,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         // tabela). Página com imagem de fundo: vale a cor da imagem ali embaixo.
         // Só página de cor lisa: fundo em imagem vai como foi salvo, sem adivinhar cor.
         const pageColor = page?.bgImage ? null : page?.bgColor ?? 'ffffff';
-        let tree = nestShapes(pageColor ? stripSame(block.tree!, pageColor) : block.tree!);
+        let tree = nestShapes(await solidify(pageColor ? stripSame(block.tree!, pageColor) : block.tree!, ctx));
         // Logo solto no topo da primeira página da seção (Sumário, Quadro
         // resumo): vai pro cabeçalho; o título fica como texto na página.
         if (bi === 0 && newBackground) {
