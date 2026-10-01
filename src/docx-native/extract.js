@@ -280,28 +280,23 @@
       if (t) t.abs = positioned;
       return t;
     }
-    // Enfeite solto (posição absoluta, sem texto) dentro de caixa que recorta
-    // ou tem pintura própria — os círculos no canto de um banner: entra na
-    // captura da pintura da caixa, recortado como no Studio, em vez de virar
-    // item à parte (que vazaria da caixa no Word).
-    // Só o que a caixa recorta de verdade (passa da borda dela): um logo solto
-    // dentro de um fundo branco é imagem própria, não parte da pintura.
+    // Caixa que recorta (overflow hidden) com enfeite solto passando da
+    // borda: o enfeite fica, cortado no limite da caixa (vira célula com
+    // preenchimento no Word, em vez de imagem de fundo).
     const clips = cs.overflow !== 'visible';
-    const outside = (c) => {
-      const r = box(c);
-      return r.x < b.x - 1 || r.y < b.y - 1 || r.x + r.w > b.x + b.w + 1 || r.y + r.h > b.y + b.h + 1;
+    const clip = (n) => {
+      const x0 = Math.max(n.box.x, b.x);
+      const y0 = Math.max(n.box.y, b.y);
+      const x1 = Math.min(n.box.x + n.box.w, b.x + b.w);
+      const y1 = Math.min(n.box.y + n.box.h, b.y + b.h);
+      if (x1 - x0 < 0.5 || y1 - y0 < 0.5) return null;
+      if (n.k === 'text' || n.k === 'img' || n.k === 'raster') return n;
+      const out = { ...n, box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } };
+      if (n.kids) out.kids = n.kids.map(clip).filter(Boolean);
+      return out;
     };
-    const baked = clips && (deco.fill || deco.border || deco.bgImage || deco.paint)
-      ? [...el.children].filter((c) => {
-          const ccs = getComputedStyle(c);
-          return (ccs.position === 'absolute' || ccs.position === 'fixed') && !c.textContent.trim() && visible(c, ccs) && outside(c);
-        })
-      : [];
-    if (baked.length) {
-      deco.paint = true;
-      for (const c of baked) c.setAttribute('data-dx-baked', '');
-    }
-    const kids = [...el.children].filter((c) => !baked.includes(c)).map((c) => node(c, link)).filter(Boolean);
+    let kids = [...el.children].map((c) => node(c, link)).filter(Boolean);
+    if (clips && (deco.fill || deco.border)) kids = kids.map((k) => (k.abs && k.k !== 'text' ? clip(k) : k)).filter(Boolean);
     if (!kids.length) {
       // Caixa vazia com cor = forma (barra, linha divisória, quadrado).
       if (deco.fill || deco.border || deco.bgImage) return { k: 'shape', id: mark(el, deco), box: b, ...deco, abs: positioned };

@@ -668,18 +668,21 @@ const nestShapes = (n: LayoutNode): LayoutNode => {
   let kids = n.kids.map(nestShapes);
   const shapes = kids.filter((k) => k.k === 'shape' && !isLine(k) && (k as { fill?: string }).fill);
   for (const shape of shapes.sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h)) {
-    if (!kids.includes(shape)) continue;
-    const inside = kids.filter((k) => k !== shape && k.k !== 'shape' && contains(shape.box, k.box));
+    const at = kids.indexOf(shape);
+    if (at < 0) continue;
+    // Só o que é desenhado por cima dele (depois, na ordem) e está dentro.
+    const inside = kids.filter((k, i) => i > at && contains(shape.box, k.box));
     // Só é fundo de card se tem texto em cima. Forma só com ícone (a bola
     // branca com a seta entre dois cards) é enfeite: vai como desenho.
     if (!inside.some(hasText)) continue;
-    kids = kids.filter((k) => !inside.includes(k) && k !== shape);
-    kids.push({
+    const box = {
       ...(shape as Extract<LayoutNode, { k: 'shape' }>),
       k: 'box',
       kids: inside,
       layout: { display: 'block', dir: 'row', alignItems: 'normal', justify: 'normal', textAlign: 'left' },
-    } as LayoutNode);
+    } as LayoutNode;
+    // No lugar da forma: a ordem de empilhamento continua a mesma.
+    kids = kids.flatMap((k) => (k === shape ? [box] : inside.includes(k) ? [] : [k]));
   }
   return { ...n, kids };
 };
@@ -690,47 +693,87 @@ const nestShapes = (n: LayoutNode): LayoutNode => {
  * capítulo). Devolve a cor: vira preenchimento de célula, como a equipe
  * monta, em vez de arte atrás do texto (que desalinha no Word).
  */
-const solidRect = (svg: Buffer): string | null => {
-  const src = svg.toString('utf8');
-  if (src.length > 4000 || /<(image|text|linearGradient|radialGradient|pattern|mask|filter|clipPath|use)\b/i.test(src)) return null;
-  const shapes = [...src.matchAll(/<(path|rect|circle|ellipse|polygon|polyline|line)\b([^>]*)>/gi)];
-  if (shapes.length !== 1) return null;
-  const [, tag, attrs] = shapes[0];
-  const fill = attrs.match(/fill="#([0-9a-f]{6})"/i)?.[1];
-  if (!fill || /stroke="(?!none)/i.test(attrs) || /opacity="0?\.\d/i.test(attrs)) return null;
-  const vb = src.match(/viewBox="\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)/);
-  if (!vb) return null;
-  const [W, H] = [Number(vb[1]), Number(vb[2])];
-  if (tag.toLowerCase() === 'rect') {
-    const n = (k: string) => Number(attrs.match(new RegExp(`\\b${k}="([\\d.]+)"`))?.[1] ?? NaN);
-    return n('width') >= W * 0.95 && n('height') >= H * 0.95 ? fill.toLowerCase() : null;
+type SvgRect = { x: number; y: number; w: number; h: number; fill: string };
+
+/** Uma peça do SVG que é retângulo (cantos arredondados ou não) de cor lisa, nas coordenadas do SVG. */
+const rectOf = (tag: string, attrs: string): SvgRect | null => {
+  const fill = attrs.match(/fill="#([0-9a-f]{6})"/i)?.[1]?.toLowerCase();
+  if (!fill || /stroke="(?!none)/i.test(attrs) || /opacity="0?\.\d/i.test(attrs) || /transform=/i.test(attrs)) return null;
+  if (tag === 'rect') {
+    const n = (k: string, d = NaN) => Number(attrs.match(new RegExp(`\\b${k}="(-?[\\d.]+)"`))?.[1] ?? d);
+    const w = n('width');
+    const h = n('height');
+    return w > 0 && h > 0 ? { x: n('x', 0), y: n('y', 0), w, h, fill } : null;
   }
-  if (tag.toLowerCase() !== 'path') return null;
+  if (tag !== 'path') return null;
   const d = attrs.match(/\bd="([^"]+)"/)?.[1] ?? '';
-  // Retângulo (arredondado): poucos segmentos, pelo menos dois retos, no
-  // máximo quatro curvas (os cantos), cobrindo a área toda. Círculo e ícone não passam.
   const cmds = d.match(/[a-z]/gi) ?? [];
   const curves = cmds.filter((c) => /[csqa]/i.test(c)).length;
   const straight = cmds.filter((c) => /[hvl]/i.test(c)).length;
   if (cmds.length > 16 || curves > 4 || straight < 2) return null;
   if (/[mlhvcsqaz]/.test(d)) return null; // comandos relativos: sem medir com segurança
-  // Pontos do contorno (absolutos): H/V levam uma coordenada, o resto pares.
   const xs: number[] = [];
   const ys: number[] = [];
   let cx = 0;
   let cy = 0;
+  const curvesAt: number[][] = [];
   for (const [, c, args] of d.matchAll(/([MLHVCSQTAZ])([^MLHVCSQTAZ]*)/g)) {
     const v = (args.match(/-?[\d.]+(?:e-?\d+)?/gi) ?? []).map(Number);
     if (c === 'H') v.forEach((x) => xs.push((cx = x)));
     else if (c === 'V') v.forEach((y) => ys.push((cy = y)));
     else if (c === 'A') return null;
-    else for (let i = 0; i + 1 < v.length; i += 2) { xs.push((cx = v[i])); ys.push((cy = v[i + 1])); }
+    else if (c === 'L') {
+      // Retângulo só tem traço reto na horizontal ou vertical (o pino em gota tem diagonais).
+      for (let i = 0; i + 1 < v.length; i += 2) {
+        if (Math.abs(v[i] - cx) > 0.5 && Math.abs(v[i + 1] - cy) > 0.5) return null;
+        xs.push((cx = v[i]));
+        ys.push((cy = v[i + 1]));
+      }
+    } else if (c === 'C') {
+      for (let i = 0; i + 5 < v.length; i += 6) {
+        curvesAt.push([cx, cy, v[i + 4], v[i + 5]]);
+        xs.push((cx = v[i + 4]));
+        ys.push((cy = v[i + 5]));
+      }
+    } else for (let i = 0; i + 1 < v.length; i += 2) { xs.push((cx = v[i])); ys.push((cy = v[i + 1])); }
   }
-  void cx; void cy;
   if (!xs.length || !ys.length) return null;
-  const spanX = Math.max(...xs) - Math.min(...xs);
-  const spanY = Math.max(...ys) - Math.min(...ys);
-  return spanX >= W * 0.9 && spanY >= H * 0.9 ? fill.toLowerCase() : null;
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  const w = Math.max(...xs) - x;
+  const h = Math.max(...ys) - y;
+  if (w <= 0 || h <= 0) return null;
+  // Canto arredondado: cada curva é pequena e liga dois lados.
+  if (curvesAt.some(([x0, y0, x1, y1]) => Math.abs(x1 - x0) > w * 0.5 || Math.abs(y1 - y0) > h * 0.5)) return null;
+  return { x, y, w, h, fill };
+};
+
+/**
+ * SVG feito só de retângulos de cor lisa (fundo de cabeçalho/selo exportado
+ * do Figma). Devolve os retângulos e o tamanho do SVG, ou null.
+ */
+const svgRects = (svg: Buffer): { W: number; H: number; rects: SvgRect[] } | null => {
+  const src = svg.toString('utf8');
+  if (src.length > 8000 || /<(image|text|linearGradient|radialGradient|pattern|mask|filter|use)\b/i.test(src)) return null;
+  const vb = src.match(/viewBox="\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)/);
+  if (!vb) return null;
+  const shapes = [...src.matchAll(/<(path|rect|circle|ellipse|polygon|polyline|line)\b([^>]*)>/gi)];
+  if (!shapes.length || shapes.length > 8) return null;
+  const rects: SvgRect[] = [];
+  for (const [, tag, attrs] of shapes) {
+    const r = rectOf(tag.toLowerCase(), attrs);
+    if (!r) return null;
+    rects.push(r);
+  }
+  return { W: Number(vb[1]), H: Number(vb[2]), rects };
+};
+
+/** SVG que é um retângulo só, cobrindo tudo: a cor dele. */
+const solidRect = (svg: Buffer): string | null => {
+  const r = svgRects(svg);
+  if (!r || r.rects.length !== 1) return null;
+  const [q] = r.rects;
+  return q.w >= r.W * 0.9 && q.h >= r.H * 0.9 ? q.fill : null;
 };
 
 /** Troca imagens que são só um retângulo de cor por forma com preenchimento. */
@@ -741,7 +784,26 @@ const solidify = async (n: LayoutNode, ctx: Ctx): Promise<LayoutNode> => {
     return fill ? ({ k: 'shape', id: n.id, box: n.box, fill, abs: n.abs } as LayoutNode) : n;
   }
   if (n.k !== 'box') return n;
-  const kids = await Promise.all(n.kids.map((k) => solidify(k, ctx)));
+  let kids = await Promise.all(n.kids.map((k) => solidify(k, ctx)));
+  // Fundo em SVG feito de retângulos lisos (cabeçalho "Lance fixo"): os
+  // retângulos viram formas por baixo das peças — preenchimento de célula.
+  if (n.bgImage && /\.svg(\?|$)/i.test(n.bgImage)) {
+    const image = await ctx.assets.image(n.bgImage, n.box.w, n.box.h);
+    const r = image?.svg ? svgRects(image.svg) : null;
+    if (r) {
+      const sx = n.box.w / r.W;
+      const sy = n.box.h / r.H;
+      const shapes = r.rects.map((q, i) => {
+        const x0 = Math.max(n.box.x, n.box.x + q.x * sx);
+        const y0 = Math.max(n.box.y, n.box.y + q.y * sy);
+        const x1 = Math.min(right(n.box), n.box.x + (q.x + q.w) * sx);
+        const y1 = Math.min(bottom(n.box), n.box.y + (q.y + q.h) * sy);
+        return { k: 'shape', id: -1 - i, box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, fill: q.fill, abs: true } as LayoutNode;
+      }).filter((q) => q.box.w > 0.5 && q.box.h > 0.5);
+      kids = [...shapes, ...kids];
+      return { ...n, bgImage: undefined, paint: false, kids };
+    }
+  }
   // Caixa que só embrulhava a imagem: assume a forma (a posição é a dela).
   if (kids.length === 1 && kids[0].k === 'shape' && !decorated(n)) return { ...kids[0], box: n.box, abs: n.abs || kids[0].abs };
   return { ...n, kids };
@@ -1440,7 +1502,219 @@ const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids
  * imagem só, atrás, e o texto fica editável por cima, em tabela, no lugar.
  */
 
+/**
+ * Composição livre do Figma (peças soltas) montada como UMA tabela, no
+ * padrão da equipe: cada texto e cada ícone na sua célula, retângulos e
+ * barras como preenchimento das células, contornos como bordas, linhas finas
+ * como borda de baixo. Os cortes da grade saem das bordas esquerda/superior
+ * das peças (e dos quatro lados dos retângulos); cada peça ocupa as células
+ * até o próximo corte, mesclando. Cantos arredondados viram retos.
+ * Devolve null quando não dá (peças de conteúdo sobrepostas, imagem de
+ * fundo, grade grande demais) — aí vai a composição em imagem.
+ */
+type GContent = { node: LayoutNode; box: Box; span: Box; center: boolean };
+type GRect = { box: Box; fill?: string; border?: CellIR['borders']; z: number };
+const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<OutIR[] | null> => {
+  const contents: GContent[] = [];
+  const rects: GRect[] = [];
+  const lines: { box: Box; color: string }[] = [];
+  let z = 0;
+  let fail = false;
+  const walk = (n: LayoutNode): void => {
+    if (fail) return;
+    if (n.k === 'text' || n.k === 'img' || n.k === 'raster') {
+      contents.push({ node: n, box: n.box, span: n.box, center: false });
+      return;
+    }
+    if (n.k === 'shape') {
+      const fill = (n as { fill?: string }).fill;
+      if (isLine(n)) lines.push({ box: n.box, color: fill ?? '000000' });
+      else if (n.bgImage) fail = true;
+      else rects.push({ box: n.box, fill, border: n.border as CellIR['borders'], z: z++ });
+      return;
+    }
+    if (n.k !== 'box') return;
+    if (n.bgImage || (n.paint && !n.fill)) {
+      fail = true;
+      return;
+    }
+    // Desenho feito de imagens sobrepostas (pino + ícone dentro): uma
+    // imagem só, na sua célula.
+    if (!hasText(n) && !decorated(n)) {
+      const imgs = everyNode(n).filter((k) => k.k === 'img' || k.k === 'raster');
+      if (imgs.length >= 2 && imgs.some((a, i) => imgs.some((b, j) => j > i && overlaps(a.box, b.box)))) {
+        contents.push({ node: { k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, box: n.box, span: n.box, center: false });
+        return;
+      }
+    }
+    if (decorated(n)) rects.push({ box: n.box, fill: n.fill, border: n.border as CellIR['borders'], z: z++ });
+    n.kids.forEach(walk);
+  };
+  walk(tree);
+  if (fail || !contents.length) return null;
+
+  // Área: tudo que desenha, sem passar da largura da região.
+  const all = [...contents.map((c) => c.box), ...rects.map((r) => r.box), ...lines.map((l) => l.box)];
+  const L = Math.max(region.x, Math.min(...all.map((b) => b.x)));
+  const T = Math.min(...all.map((b) => b.y));
+  const R = Math.min(right(region), Math.max(...all.map(right)));
+  const B = Math.max(...all.map(bottom));
+  const clampX = (x: number) => Math.max(L, Math.min(R, x));
+
+  // Texto ocupa até onde as linhas terminam (a caixa pode ter a largura do
+  // card, por baixo do ícone no canto).
+  for (const c of contents) {
+    if (c.node.k !== 'text' || !c.node.inkRight) continue;
+    const w = Math.min(c.box.w, c.node.inkRight - c.box.x + 2);
+    if (w > 4) c.span = { ...c.span, w };
+  }
+  // Textos empilhados cujas caixas se encostam (entrelinha apertada do
+  // título grande): a de cima termina onde a de baixo começa.
+  for (const a of contents) {
+    for (const b of contents) {
+      if (a === b || a.node.k !== 'text' || b.node.k !== 'text') continue;
+      const ov = bottom(a.span) - b.span.y;
+      const sideBySide = Math.min(right(a.span), right(b.span)) - Math.max(a.span.x, b.span.x) <= 1.5;
+      if (!sideBySide && b.span.y > a.span.y && ov > 0 && ov < 0.4 * Math.min(a.span.h, b.span.h)) a.span = { ...a.span, h: b.span.y - a.span.y };
+    }
+  }
+  // Ícone sozinho dentro de um quadrado/círculo: a célula é o quadrado.
+  for (const c of contents) {
+    if (c.node.k === 'text') continue;
+    const owners = rects
+      .filter((r) => contains(r.box, c.box) && r.box.w * r.box.h <= 9 * c.box.w * c.box.h)
+      .sort((a, b) => a.box.w * a.box.h - b.box.w * b.box.h);
+    const owner = owners[0];
+    if (owner && !contents.some((o) => o !== c && contains(owner.box, o.box))) {
+      c.span = owner.box;
+      c.center = true;
+    }
+  }
+  // Ícone no canto que só encosta no topo do texto (card com ícone em cima à
+  // direita): o texto começa logo abaixo dele.
+  for (const t of contents) {
+    if (t.node.k !== 'text') continue;
+    for (const o of contents) {
+      if (o === t || o.node.k === 'text') continue;
+      const ovx = Math.min(right(o.span), right(t.span)) - Math.max(o.span.x, t.span.x);
+      const ovy = bottom(o.span) - t.span.y;
+      if (ovx > 1.5 && o.span.y < t.span.y && ovy > 0 && ovy < 0.35 * t.span.h) t.span = { ...t.span, y: bottom(o.span), h: t.span.h - ovy };
+    }
+  }
+  // Conteúdo sobreposto: não cabe em grade.
+  for (let i = 0; i < contents.length; i++) {
+    for (let j = i + 1; j < contents.length; j++) {
+      const a = contents[i].span;
+      const b = contents[j].span;
+      if (Math.min(right(a), right(b)) - Math.max(a.x, b.x) > 1.5 && Math.min(bottom(a), bottom(b)) - Math.max(a.y, b.y) > 1.5) return null;
+    }
+  }
+
+  const snap = (vals: number[]) => {
+    const out: number[] = [];
+    for (const v of vals.sort((a, b) => a - b)) if (!out.length || v - out[out.length - 1] > 1.5) out.push(v);
+    return out;
+  };
+  const xs = snap([L, R, ...contents.map((c) => clampX(c.span.x)), ...rects.flatMap((r) => [clampX(r.box.x), clampX(right(r.box))])]);
+  const ys = snap([T, B, ...contents.map((c) => c.span.y), ...rects.flatMap((r) => [r.box.y, bottom(r.box)]), ...lines.map((l) => l.box.y)]);
+  if (xs.length - 1 > 30 || ys.length - 1 > 60) return null;
+  const idx = (cuts: number[], v: number) => cuts.reduce((best, c, i) => (Math.abs(c - v) < Math.abs(cuts[best] - v) ? i : best), 0);
+  const upTo = (cuts: number[], v: number) => {
+    const i = cuts.findIndex((c) => c >= v - 1.5);
+    return i < 0 ? cuts.length - 1 : i;
+  };
+  const nc = xs.length - 1;
+  const nr = ys.length - 1;
+  const occ: number[][] = Array.from({ length: nr }, () => Array(nc).fill(-1));
+  const spans = contents.map((c) => {
+    const c0 = idx(xs, clampX(c.span.x));
+    const r0 = idx(ys, c.span.y);
+    const c1 = Math.max(c0 + 1, upTo(xs, clampX(right(c.span))));
+    const r1 = Math.max(r0 + 1, upTo(ys, bottom(c.span)));
+    return { c0, c1, r0, r1 };
+  });
+  // Se o próximo corte ficou ocupado (conteúdo encostado), encolhe até ele.
+  for (const [k, sp] of spans.entries()) {
+    for (let r = sp.r0; r < sp.r1; r++) {
+      for (let c = sp.c0; c < sp.c1; c++) {
+        if (occ[r][c] !== -1) return null;
+        occ[r][c] = k;
+      }
+    }
+  }
+  const fillAt = (x: number, y: number) => {
+    let best: GRect | null = null;
+    for (const r of rects) if (r.fill && x >= r.box.x - 0.5 && x <= right(r.box) + 0.5 && y >= r.box.y - 0.5 && y <= bottom(r.box) + 0.5 && (!best || r.z > best.z)) best = r;
+    return best?.fill;
+  };
+  const bordersFor = (x0: number, x1: number, y0: number, y1: number): CellIR['borders'] => {
+    const b: NonNullable<CellIR['borders']> = {};
+    const cx = (x0 + x1) / 2;
+    const cy = (y0 + y1) / 2;
+    for (const r of rects) {
+      if (!r.border || cx < r.box.x || cx > right(r.box) || cy < r.box.y || cy > bottom(r.box)) continue;
+      if (r.border.top && Math.abs(y0 - r.box.y) < 1.5) b.top = r.border.top;
+      if (r.border.bottom && Math.abs(y1 - bottom(r.box)) < 1.5) b.bottom = r.border.bottom;
+      if (r.border.left && Math.abs(x0 - clampX(r.box.x)) < 1.5) b.left = r.border.left;
+      if (r.border.right && Math.abs(x1 - clampX(right(r.box))) < 1.5) b.right = r.border.right;
+    }
+    for (const l of lines) {
+      if (Math.abs(y1 - l.box.y) < 2.5 && cx >= l.box.x - 1 && cx <= right(l.box) + 1) b.bottom = { w: Math.max(0.5, l.box.h), color: l.color };
+    }
+    return Object.keys(b).length ? b : undefined;
+  };
+
+  const rows: TIR['rows'] = [];
+  for (let r = 0; r < nr; r++) {
+    const cells: CellIR[] = [];
+    const y0 = ys[r];
+    const y1 = ys[r + 1];
+    for (let c = 0; c < nc; ) {
+      const k = occ[r][c];
+      if (k >= 0) {
+        const sp = spans[k];
+        const x0 = xs[sp.c0];
+        const x1 = xs[sp.c1];
+        const width = x1 - x0;
+        const cont = contents[k];
+        const fill = fillAt(cont.span.x + cont.span.w / 2, cont.span.y + cont.span.h / 2);
+        const borders = bordersFor(x0, x1, ys[sp.r0], ys[sp.r1]);
+        if (r === sp.r0) {
+          const cellBox = { x: x0, y: ys[sp.r0], w: width, h: ys[sp.r1] - ys[sp.r0] };
+          let children: OutIR[];
+          if (cont.node.k === 'text') {
+            children = textToParagraphs(cont.node, cellBox, ctx);
+          } else {
+            children = await renderItem(cont.node, cellBox, ctx);
+            for (const p of children) if (p.kind === 'p' && cont.center) { p.align = 'center'; p.indentLeft = 0; p.spaceBefore = undefined; }
+          }
+          const top = Math.max(0, cont.box.y - cellBox.y);
+          if (!cont.center && top > 0.5) children = withGap(children, top);
+          cells.push({ width, fill, borders, vmerge: sp.r1 - sp.r0 > 1 ? 'restart' : undefined, vAlign: cont.center ? 'center' : 'top', children });
+        } else {
+          cells.push({ width, fill, borders, vmerge: 'continue', children: [] });
+        }
+        c = sp.c1;
+        continue;
+      }
+      // Células vazias vizinhas com o mesmo fundo e bordas viram uma só.
+      const x0 = xs[c];
+      const fill = fillAt((x0 + xs[c + 1]) / 2, (y0 + y1) / 2);
+      let c2 = c + 1;
+      const key = (cc: number) => JSON.stringify([fillAt((xs[cc] + xs[cc + 1]) / 2, (y0 + y1) / 2), bordersFor(xs[cc], xs[cc + 1], y0, y1)]);
+      const k0 = key(c);
+      while (c2 < nc && occ[r][c2] === -1 && key(c2) === k0) c2++;
+      cells.push({ width: xs[c2] - x0, fill, borders: bordersFor(x0, xs[c2], y0, y1), children: [] });
+      c = c2;
+    }
+    rows.push({ height: y1 - y0, cells });
+  }
+  return [{ kind: 't', width: R - L, indent: L - region.x, rows }];
+};
+
 const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<OutIR[]> => {
+  const grid = await gridCompose(tree, region, ctx);
+  if (grid) return grid;
   const texts: LayoutNode[] = [];
   const collect = (n: LayoutNode) => (n.k === 'text' ? texts.push(n) : n.k === 'box' ? n.kids.forEach(collect) : undefined);
   collect(tree);
