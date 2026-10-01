@@ -171,7 +171,20 @@ const coverPagesOf = (layout: DocumentLayout): Set<number> => {
   const ownBackground = (i: number, neighbour: number) =>
     pages[i]?.bgImage && pages[neighbour] && pages[i].bgImage !== pages[neighbour].bgImage;
   if (pages.length > 1 && ownBackground(0, 1)) covers.add(0);
-  if (pages.length > 2 && ownBackground(pages.length - 1, pages.length - 2)) covers.add(pages.length - 1);
+  // Contracapa só com pouco texto: a última página do anexo, com fundo
+  // próprio mas conteúdo corrido, não é capa (ia inteira pro cabeçalho).
+  const chars = (i: number) => {
+    let n = 0;
+    const walk = (t: import('./layout.js').LayoutNode | null): void => {
+      if (!t) return;
+      if (t.k === 'text') n += t.paras.reduce((a, p) => a + p.runs.reduce((b, r) => b + (r.t?.length ?? 0), 0), 0);
+      else if (t.k === 'box') t.kids.forEach(walk);
+    };
+    layout.blocks.filter((b) => b.page === i).forEach((b) => walk(b.tree));
+    return n;
+  };
+  const last = pages.length - 1;
+  if (pages.length > 2 && ownBackground(last, last - 1) && chars(last) <= 150) covers.add(last);
   return covers;
 };
 
