@@ -347,10 +347,15 @@ const unwrap = (t: TIR): TIR => {
     });
     return { ...r, cells };
   });
-  const innerH = inner.rows.reduce((a, r) => a + (r.height ?? 0), 0);
-  const outerH = t.rows[0].height ?? 0;
+  // A altura de cada linha inclui o espaço de cima/baixo que veio da caixa de
+  // fora (vira espaçamento de parágrafo): sem isso a soma das linhas ficava
+  // menor que a real e quem completa a altura (flattenGrid) esticava demais.
+  if (rows[0].height !== undefined) rows[0].height += mt;
   const lastRow = rows[rows.length - 1];
-  if (outerH > innerH + mt + mb) lastRow.height = (lastRow.height ?? 0) + (outerH - innerH - mt - mb);
+  if (lastRow.height !== undefined) lastRow.height += mb;
+  const innerH = rows.reduce((a, r) => a + (r.height ?? 0), 0);
+  const outerH = t.rows[0].height ?? 0;
+  if (outerH > innerH) lastRow.height = (lastRow.height ?? 0) + (outerH - innerH);
   return { ...t, rows };
 };
 
@@ -616,6 +621,22 @@ const growGap = (gap: number, from: PIR): PIR => ({
   grow: Math.max(2, Math.min(144, Math.round((gap / simpleRatio) * 1.5))),
 });
 
+/** Tira o "manter com o próximo" do último item (parágrafo, ou última linha da tabela, inteira). */
+const releaseTail = (items: OutIR[]) => {
+  const last = items[items.length - 1];
+  if (!last) return;
+  if (last.kind === 'p') {
+    last.keepNext = false;
+    return;
+  }
+  const row = last.rows[last.rows.length - 1];
+  for (const c of row.cells) for (const p of allParagraphs(c.children)) p.keepNext = false;
+  // Linha de cima mesclada com essa (selo + texto): também solta.
+  if (row.cells.some((c) => c.vmerge === 'continue') && last.rows.length > 1) {
+    for (const c of last.rows[last.rows.length - 2].cells) for (const p of allParagraphs(c.children)) p.keepNext = false;
+  }
+};
+
 const leaves = (nodes: LayoutNode[]): LayoutNode[] =>
   nodes.flatMap((n) => (n.k === 'box' && !decorated(n) && !n.bgImage ? leaves(n.kids) : [n]));
 
@@ -745,6 +766,12 @@ const complexRoot = (n: LayoutNode): boolean => {
   // embrulham: o ícone no canto vazio de um card não é sobreposição.
   const seen = (k: LayoutNode) => leaves([k]).filter((l) => !isLine(l));
   if (kids.some((a, i) => kids.some((b, j) => j > i && (a.abs || b.abs) && seen(a).some((x) => seen(b).some((y) => overlaps(x.box, y.box)))))) return true;
+  // Composição livre do Figma: todas as peças soltas, com texto E desenho
+  // solto (barra de progresso, pinos, ícones) — fatiar em tabela perdia os
+  // desenhos (a barra e as legendas do "Análise de crédito" sumiam).
+  const drawing = (k: LayoutNode): boolean =>
+    k.k === 'img' || k.k === 'raster' || (k.k === 'shape' && !isLine(k)) || (k.k === 'box' && !hasText(k) && k.kids.length > 0);
+  if (kids.length >= 3 && kids.every((k) => k.abs) && kids.some(hasText) && kids.filter(drawing).length >= 2) return true;
   // Vazamento só conta pra desenho (ícone de 80px num título de 22px); texto
   // posicionado fora da caixa é só o jeito do Figma de posicionar.
   return kids.some((k) => k.abs && !hasText(k) && overflow(k.box, n.box) > Math.max(16, 0.4 * Math.min(k.box.w, k.box.h)));
@@ -789,9 +816,9 @@ const lineOf = (para: Para, face: Face | null): PIR['line'] => {
   if (!para.lineHeight) return undefined;
   const natural = (face?.lineHeight ?? 1.2) * para.fontSize;
   const m = para.lineHeight / natural;
-  // Menor que a natural: Simples. Múltiplos abaixo de 1 o Word corta o espaço
-  // de cima da linha e o texto sobe (o "15" do calendário saía do lugar).
-  return { value: m < 1.08 ? 240 : Math.round(240 * m), rule: 'auto' };
+  // Igual à natural: Simples. Diferente: Múltiplos com o fator exato (a
+  // linha de uma linha só com fator < 1 é tratada em oneLineSpacing).
+  return { value: Math.abs(m - 1) < 0.02 ? 240 : Math.round(240 * Math.max(0.8, m)), rule: 'auto' };
 };
 
 /**
@@ -924,7 +951,10 @@ const manualClause = (node: Extract<LayoutNode, { k: 'text' }>, p: PIR, ctx: Ctx
  */
 const oneLineSpacing = (para: Para, face: Face | null, wrapped: boolean): Pick<PIR, 'line' | 'spaceBefore' | 'spaceAfter'> => {
   const line = lineOf(para, face);
-  if (wrapped || !line || line.value <= 240 || !para.lineHeight || para.runs.some((r) => r.br)) return { line };
+  if (wrapped || !line || line.value === 240 || !para.lineHeight || para.runs.some((r) => r.br)) return { line };
+  // Uma linha mais apertada que a fonte: Simples (Múltiplos < 1 corta o espaço
+  // de cima e o texto sobe — o "15" do calendário).
+  if (line.value < 240) return { line: { value: 240, rule: 'auto' } };
   const half = (para.lineHeight - (face?.lineHeight ?? 1.2) * para.fontSize) / 2;
   return { line: { value: 240, rule: 'auto' }, spaceBefore: half, spaceAfter: half };
 };
@@ -1393,7 +1423,8 @@ const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids
             width: n.box.w,
             ...paint,
             margins: [pad[0], pad[1], pad[2], pad[3]],
-            vAlign: layout && (layout.alignItems === 'center' || layout.justify === 'center') ? 'center' : 'top',
+            // Centro vertical: em flex de linha é align-items; em coluna, justify-content.
+            vAlign: layout && (/column/.test(layout.dir) ? layout.justify === 'center' : /flex|grid/.test(layout.display) && layout.alignItems === 'center') ? 'center' : 'top',
             children: children.length ? children : [{ kind: 'p', runs: [] }],
           },
         ],
@@ -1444,7 +1475,9 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
   // Texto em cima do desenho? Se não (rótulos embaixo dos ícones da linha do
   // tempo), a arte vai na frente: atrás, o sombreamento de uma célula em volta
   // (quadro branco) a cobriria. A captura é transparente fora do desenho.
-  const art = all.filter((n) => n.k === 'img' || n.k === 'raster' || n.k === 'shape');
+  // Arte = tudo que pinta: imagens, formas e caixas com fundo/borda (o card
+  // colorido do "30%" — com a arte na frente, o texto sumia embaixo dela).
+  const art = all.filter((n) => n.k === 'img' || n.k === 'raster' || n.k === 'shape' || (n.k === 'box' && (decorated(n) || Boolean(n.bgImage))));
   const textOverArt = texts.some((t) => art.some((a) => overlaps(t.box, a.box)));
   // A tabela fica no lugar do fluxo; o desenho que vaza pros lados (a bola
   // entre dois cards, numa coluna de 24px) vai deslocado na âncora — tabela
@@ -1813,15 +1846,6 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     if (title) title.heading = native ?? 1;
   };
 
-  // Espaço típico entre blocos (mediana dos vãos dentro de uma mesma página):
-  // é o que vale quando o Studio mudou de página e o Word continua fluindo.
-  const sameGaps: number[] = [];
-  for (let i = 1; i < layout.blocks.length; i++) {
-    const [a, b] = [layout.blocks[i - 1], layout.blocks[i]];
-    if (a.tree && b.tree && a.page === b.page) sameGaps.push(extent(b.tree).y - bottom(extent(a.tree)));
-  }
-  sameGaps.sort((a, b) => a - b);
-  const typicalGap = Math.max(0, sameGaps[Math.floor(sameGaps.length / 2)] ?? 0);
 
   // Corpo de texto = fonte/tamanho/entrelinha mais usados no documento: é o
   // estilo Normal e a linha em branco entre tópicos.
@@ -1870,7 +1894,12 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   let previous: OutIR[] | null = null;
   // Espaço entre tópicos em linhas em branco do corpo de texto (guia da Lex:
   // "manter o espaçamento definido no corpo"), não em px quebrados do Figma.
-  const blanksFor = (gap: number) => (gap < bodyLine * 0.6 ? 0 : Math.max(1, Math.round(gap / bodyLine)));
+  // Arredonda pra baixo (só sobe com folga): arredondar 1,6 linha pra 2 em
+  // cada vão somava ~10px por bloco e a página do Studio transbordava no Word.
+  // Vão menor que uma linha do corpo fica exato (espaço antes do parágrafo,
+  // ou parágrafo-vão que cresce entre tabelas): arredondar pra uma linha
+  // inteira somava pontos em cada bloco e a página cheia do Studio transbordava.
+  const blanksFor = (gap: number) => (gap < bodyLine * 0.95 ? 0 : Math.max(1, Math.floor(gap / bodyLine + 0.2)));
   for (const [gi, group] of groups.entries()) {
     const pageTop = (i: number) => layout.pages[i].box.y;
     const blocks = layout.blocks.filter((b) => group.pages.includes(b.page) && b.tree);
@@ -1953,9 +1982,19 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         if (!cursor) {
           // Primeiro bloco da página: a distância do topo continua exata.
           placed = withGap(out, Math.max(0, area.y - (pageTop(block.page) + marginTop)));
+        } else if (cursor.page !== block.page) {
+          // Mudou de página no Studio: quebra de página no Word também, com o
+          // bloco na mesma distância do topo. Deixar o texto correr fazia um
+          // bloco que não se parte (cards) cair na página seguinte e empurrar
+          // o documento inteiro (efeito dominó).
+          const top = Math.max(0, area.y - (pageTop(block.page) + marginTop));
+          // O fim da página anterior não fica "preso" à quebra: com "manter
+          // com o próximo" o Word levava o último card junto pra página
+          // seguinte, mesmo sobrando espaço.
+          releaseTail(body);
+          placed = [{ kind: 'p', runs: [], pageBreakBefore: true, tiny: true }, ...withGap(out, top)];
         } else {
-          // Mudou de página no Studio: no Word o texto continua — separa como tópico (uma linha do corpo, no mínimo).
-          const gap = cursor.page === block.page ? area.y - cursor.y : Math.max(typicalGap, bodyLine);
+          const gap = area.y - cursor.y;
           const lastOfPrevious = previous ? allParagraphs(previous).pop() : undefined;
           const n = blanksFor(gap);
           const blanks: PIR[] = Array.from({ length: n }, () => ({ kind: 'p', runs: [], blank: true, keepNext: lastOfPrevious?.keepNext }));
@@ -2106,7 +2145,11 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           margin: {
             top: tw(sec.marginTop),
             right: tw(pad.right),
-            bottom: tw(Math.min(pad.bottom, coverBottom.get(sec.gi) ?? pad.bottom)),
+            // Folga de 20px acima do rodapé: a quebra de página já segue a do
+            // Studio, então essa área só absorve a diferença de métrica do
+            // Word (página do Studio cheia até a margem transbordava por pouco).
+            // O Word nunca deixa o corpo invadir o rodapé.
+            bottom: tw(Math.min(Math.max(0, pad.bottom - 20), coverBottom.get(sec.gi) ?? pad.bottom)),
             left: tw(pad.left),
             header: tw(sec.headerDistance),
             footer: tw(sec.foot.distance),
