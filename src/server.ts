@@ -11,6 +11,7 @@ import type { IlovepdfTask, OfficeFormat } from './ilovepdf.js';
 import { HttpError } from './errors.js';
 import { logger } from './logger.js';
 import { renderDocumentPdf } from './render.js';
+import { renderDocumentPreview } from './preview.js';
 import { renderNativeDocx } from './docx-native/index.js';
 import { finalizePdfDownload } from './pdf-download.js';
 import { serviceClient } from './supabase.js';
@@ -249,6 +250,39 @@ const handleOfficeExport = async (
 
 app.post<{ Body: PdfBody }>('/docx', (req, reply) => handleOfficeExport('docx', req, reply));
 app.post<{ Body: PdfBody }>('/pptx', (req, reply) => handleOfficeExport('pptx', req, reply));
+
+// ---------------------------------------------------------------------------
+// /preview — fotos das páginas + raio-x da paginação (MCP do Studio)
+// ---------------------------------------------------------------------------
+// Mesma autorização do /pdf. Resposta em JSON (imagens em base64): quem chama
+// é o servidor do Studio, que repassa as imagens pra IA conectada.
+type PreviewBody = { documentId?: unknown; pages?: unknown; scale?: unknown };
+
+app.post<{ Body: PreviewBody }>('/preview', async (req, reply) => {
+  const { documentId, pages, scale } = req.body ?? {};
+  if (typeof documentId !== 'string' || documentId.length < 8) {
+    reply.code(400).send({ error: 'bad_request', message: 'documentId is required' });
+    return;
+  }
+  const authorization = req.headers['authorization'];
+  const apiKeyHeader = req.headers['x-api-key'];
+  const apiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
+  const authed = await authorize({
+    documentId,
+    authorization: typeof authorization === 'string' ? authorization : undefined,
+    apiKey: typeof apiKey === 'string' ? apiKey : undefined,
+  });
+
+  const wanted = Array.isArray(pages) ? pages.filter((p): p is number => Number.isInteger(p)) : [];
+  const s = typeof scale === 'number' && scale >= 0.3 && scale <= 2 ? scale : 0.8;
+  const result = await renderDocumentPreview({
+    documentId: authed.documentId,
+    workspaceId: authed.workspaceId,
+    pages: wanted,
+    scale: s,
+  });
+  reply.code(200).header('Cache-Control', 'no-store').send(result);
+});
 
 // ---------------------------------------------------------------------------
 // /compress-attachment — comprime um PDF que o chat da IA já subiu no bucket
