@@ -143,6 +143,8 @@ type Ctx = {
   instances: number;
   /** Onde a numeração de cláusulas do Word está (1.2.3 → [1, 2, 3]). */
   clauses: number[];
+  /** Instância da numeração de cláusulas: muda quando o Studio recomeça em 1 (anexo). */
+  clauseInstance?: number;
 };
 
 type ListFormat = 'lowerRoman' | 'upperRoman' | 'lowerLetter' | 'upperLetter' | 'decimal';
@@ -842,7 +844,7 @@ const manualClause = (node: Extract<LayoutNode, { k: 'text' }>, p: PIR, ctx: Ctx
   const first = p.runs.find((r) => r.kind === 'text') as Extract<RunIR, { kind: 'text' }>;
   p.mark = { run: { ...first.run, letterSpacing: first.spacing !== undefined ? first.spacing / 15 : first.run.letterSpacing }, face: first.face };
   p.runs = [];
-  p.numbering = { ref: 'clauses', level };
+  p.numbering = { ref: 'clauses', level, instance: ctx.clauseInstance };
   ctx.clauses = parts;
   return true;
 };
@@ -920,7 +922,10 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
     // O número é do Word (lista multinível), não texto: a próxima cláusula
     // criada no Word já sai numerada, com a cara do selo (a numeração herda a
     // formatação da marca de parágrafo).
-    target.numbering = { ref: 'clauses', level: Math.max(0, Math.min(level, 2)) };
+    // Studio recomeçou em 1 (anexo depois do contrato): numeração nova no Word.
+    const parts = node.autonumber.split('.').filter(Boolean).map(Number);
+    if (level === 0 && parts[0] === 1 && ctx.clauses.length) ctx.clauseInstance = ++ctx.instances;
+    target.numbering = { ref: 'clauses', level: Math.max(0, Math.min(level, 2)), instance: ctx.clauseInstance };
     ctx.clauses = node.autonumber.split('.').filter(Boolean).map(Number);
     const style = node.autonumberStyle;
     if (style) {
@@ -1124,7 +1129,12 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
     const vAlign = alignOf(col.length === 1 && !hasText(col[0]) && leaves(col).length ? union(leaves(col)) : colBox);
     // Célula na largura da coluna; o vão até a próxima vira célula vazia
     // (é onde enfeites como a seta entre dois cards voltam).
-    const own = i + 1 < cols.length ? Math.max(1, Math.min(width, right(colBox) - start)) : width;
+    // Texto de uma linha (número do sumário, título curto) ocupa a largura
+    // exata no Studio; o Word desenha um pouco mais largo e quebraria ("1|1").
+    // Folga tirada do vão até a próxima coluna.
+    const oneLine = col.every((n) => leaves([n]).every((l) => l.k !== 'text' || (l.paras.length === 1 && l.box.h < (l.paras[0].lineHeight ?? l.paras[0].fontSize * 1.2) * 1.5)));
+    const slack = oneLine ? Math.min(width - (right(colBox) - start), 6 + colBox.w * 0.15) : 0;
+    const own = i + 1 < cols.length ? Math.max(1, Math.min(width, right(colBox) - start + Math.max(0, slack))) : width;
     const children = await renderRegion(col, { x: start, y: vAlign === 'center' ? colBox.y : rowTop, w: own, h: colBox.h }, ctx);
     fit(children, own);
     cells.push({ width: own, vAlign, children: children.length ? children : [{ kind: 'p', runs: [] }] });
@@ -1768,6 +1778,8 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     body: OutIR[];
     nav: OutIR[];
     headerBg: Paragraph;
+    /** Fundo das páginas de transbordo (a primeira fica com headerBg). */
+    overflowBg: Paragraph | null;
     headerLogos: Paragraph[];
     foot: ReturnType<typeof buildFooter>;
     marginTop: number;
@@ -1922,27 +1934,35 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
 
     const logosHere = headerImages;
     headerImages = [];
-    const bg = await background(group.pages[0]);
-    const headerBg = bg
-      ? new Paragraph({
-          // Só segura a âncora do fundo: não pode ocupar altura no cabeçalho.
-          spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
-          run: { size: 2 },
-          children: [
-            new ImageRun({
-              ...(bg.svg ? { type: 'svg', data: bg.svg, fallback: { type: bg.type, data: bg.data } } : { type: bg.type, data: bg.data }),
-              transformation: { width: pageW, height: pageH },
-              floating: {
-                horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: 0 },
-                verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: 0 },
-                behindDocument: true,
-                allowOverlap: true,
-                lockAnchor: true,
-              },
-            } as never),
-          ],
-        })
-      : new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] });
+    const bgParagraph = (bg: ImageData | null) =>
+      bg
+        ? new Paragraph({
+            // Só segura a âncora do fundo: não pode ocupar altura no cabeçalho.
+            spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
+            run: { size: 2 },
+            children: [
+              new ImageRun({
+                ...(bg.svg ? { type: 'svg', data: bg.svg, fallback: { type: bg.type, data: bg.data } } : { type: bg.type, data: bg.data }),
+                transformation: { width: pageW, height: pageH },
+                floating: {
+                  horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: 0 },
+                  verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: 0 },
+                  behindDocument: true,
+                  allowOverlap: true,
+                  lockAnchor: true,
+                },
+              } as never),
+            ],
+          })
+        : new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] });
+    const headerBg = bgParagraph(await background(group.pages[0]));
+    // Fundo de uma página só (abertura de anexo com a faixa grande): se o
+    // conteúdo transbordar no Word, a página de transbordo leva o fundo da
+    // página seguinte do Studio, não a faixa repetida.
+    const firstIdx = group.pages[0];
+    const unique = !group.bg.startsWith('cover:') && group.pages.length === 1 && group.bg !== 'none' && !layout.pages.some((p) => p.index !== firstIdx && bgKey(p.index) === group.bg);
+    const nextIdx = firstIdx + 1;
+    const overflowBg = unique && layout.pages[nextIdx] && !coverPages.has(nextIdx) ? bgParagraph(await background(nextIdx)) : null;
 
     // Menu de seções no cabeçalho, como tabela, com links pros capítulos.
     let headerDistance = 0;
@@ -1975,7 +1995,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         ],
       }),
     );
-    sectionsIR.push({ gi, body, nav: navIR, headerBg, headerLogos, foot, marginTop, headerDistance });
+    sectionsIR.push({ gi, body, nav: navIR, headerBg, overflowBg, headerLogos, foot, marginTop, headerDistance });
   }
 
   // Indicador só onde algum link aponta (menu, sumário, links do texto).
@@ -1995,14 +2015,21 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
 
   const sections: ISectionOptions[] = sectionsIR.map((sec) => {
     const headerChildren: (Paragraph | Table)[] = [sec.headerBg, ...sec.headerLogos];
+    const overflowChildren: (Paragraph | Table)[] | null = sec.overflowBg ? [sec.overflowBg] : null;
     if (sec.nav.length) {
       const navBlocks = toBlocks(sec.nav);
       headerChildren.push(...navBlocks);
       if (navBlocks[navBlocks.length - 1] instanceof Table) headerChildren.push(toParagraph(spacer(0.5)));
+      if (overflowChildren) {
+        const again = toBlocks(sec.nav);
+        overflowChildren.push(...again);
+        if (again[again.length - 1] instanceof Table) overflowChildren.push(toParagraph(spacer(0.5)));
+      }
     }
     return {
       properties: {
         type: sec.gi === 0 || groups[sec.gi - 1].bg.startsWith('cover:') ? SectionType.NEXT_PAGE : SectionType.CONTINUOUS,
+        ...(overflowChildren ? { titlePage: true } : {}),
         page: {
           size: { width: tw(pageW), height: tw(pageH) },
           margin: {
@@ -2015,8 +2042,12 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           },
         },
       },
-      headers: { default: new Header({ children: headerChildren }) },
-      footers: { default: sec.foot.footer },
+      // Com transbordo: cabeçalho de primeira página = fundo da página do
+      // Studio; demais páginas da seção = fundo da página seguinte.
+      headers: overflowChildren
+        ? { first: new Header({ children: headerChildren }), default: new Header({ children: overflowChildren }) }
+        : { default: new Header({ children: headerChildren }) },
+      footers: overflowChildren ? { first: sec.foot.footer, default: sec.foot.footer } : { default: sec.foot.footer },
       children: toBlocks(separate(joinTight(sec.body)), true),
     };
   });
