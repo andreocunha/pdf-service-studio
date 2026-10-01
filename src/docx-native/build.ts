@@ -1561,7 +1561,7 @@ const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids
  * Devolve null quando não dá (peças de conteúdo sobrepostas, imagem de
  * fundo, grade grande demais) — aí vai a composição em imagem.
  */
-type GContent = { node: LayoutNode; box: Box; span: Box; center: boolean };
+type GContent = { node: LayoutNode; box: Box; span: Box; center: boolean; round?: boolean; card?: boolean };
 type GRect = { box: Box; fill?: string; border?: CellIR['borders']; z: number };
 const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<OutIR[] | null> => {
   const contents: GContent[] = [];
@@ -1593,8 +1593,14 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
       (k.k === 'shape' || k.k === 'box') && (k.radius ?? 0) >= 0.45 * Math.min(k.box.w, k.box.h) && Boolean((k as { fill?: string }).fill);
     const shortText = everyNode(n).filter((k) => k.k === 'text').reduce((a, k) => a + (k.k === 'text' ? k.paras.reduce((b, p) => b + p.runs.reduce((c, r) => c + (r.t?.length ?? 0), 0), 0) : 0), 0) <= 6;
     const squarish = Math.abs(n.box.w - n.box.h) <= 0.15 * Math.max(n.box.w, n.box.h);
-    if (shortText && squarish && n.box.w <= 64 && (round(n) || n.kids.some((k) => round(k) && k.box.w * k.box.h >= 0.8 * n.box.w * n.box.h))) {
-      contents.push({ node: { k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, box: n.box, span: n.box, center: false });
+    // Selinho (quadrado/círculo de até 28px com ícone: o "X" e o check das
+    // listas): imagem do tamanho exato — célula colorida com ícone dentro
+    // ficava maior que o selo e o ícone escorregava.
+    const fills = (k: LayoutNode) => (k.k === 'shape' || k.k === 'box') && Boolean((k as { fill?: string }).fill) && k.box.w * k.box.h >= 0.8 * n.box.w * n.box.h;
+    const badge = !hasText(n) && squarish && n.box.w <= 28 && (fills(n) || n.kids.some(fills)) && everyNode(n).some((k) => k.k === 'img' || k.k === 'raster');
+    const circle = shortText && squarish && n.box.w <= 64 && (round(n) || n.kids.some((k) => round(k) && k.box.w * k.box.h >= 0.8 * n.box.w * n.box.h));
+    if (badge || circle) {
+      contents.push({ node: { k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, box: n.box, span: n.box, center: false, round: circle && !badge });
       return;
     }
     // Desenho feito de imagens sobrepostas (pino + ícone dentro): uma
@@ -1605,6 +1611,13 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
         contents.push({ node: { k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, box: n.box, span: n.box, center: false });
         return;
       }
+    }
+    // Card só com texto (fundo/borda + título e subtítulo): UMA célula, com o
+    // fundo e a borda dele — não uma célula por linha de texto.
+    const onlyText = (k: LayoutNode): boolean => k.k === 'text' || (k.k === 'box' && !decorated(k) && !k.bgImage && k.kids.every(onlyText));
+    if (decorated(n) && !n.paint && n.kids.length && n.kids.every(onlyText)) {
+      contents.push({ node: n, box: n.box, span: n.box, center: false, card: true });
+      return;
     }
     if (decorated(n)) rects.push({ box: n.box, fill: n.fill, border: n.border as CellIR['borders'], z: z++ });
     n.kids.forEach(walk);
@@ -1635,6 +1648,22 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
       const ov = bottom(a.span) - b.span.y;
       const sideBySide = Math.min(right(a.span), right(b.span)) - Math.max(a.span.x, b.span.x) <= 1.5;
       if (!sideBySide && b.span.y > a.span.y && ov > 0 && ov < 0.4 * Math.min(a.span.h, b.span.h)) a.span = { ...a.span, h: b.span.y - a.span.y };
+    }
+  }
+  // Círculo na divisa de um card ("até" entre "30%" e "80 meses"): coluna
+  // própria, o card termina onde o círculo começa.
+  for (const r of contents.filter((c) => c.round)) {
+    for (const c of contents.filter((k) => k.card)) {
+      const ovx = Math.min(right(c.span), right(r.span)) - Math.max(c.span.x, r.span.x);
+      const ovy = Math.min(bottom(c.span), bottom(r.span)) - Math.max(c.span.y, r.span.y);
+      if (ovx <= 0 || ovy <= 0) continue;
+      if (r.span.x + r.span.w / 2 > c.span.x + c.span.w / 2) c.span = { ...c.span, w: r.span.x - c.span.x };
+      else c.span = { ...c.span, x: right(r.span), w: right(c.span) - right(r.span) };
+      // O círculo ocupa a altura dos cards (centralizado): uma linha só.
+      const top = Math.min(r.span.y, c.span.y);
+      const low = Math.max(bottom(r.span), bottom(c.span));
+      r.span = { ...r.span, y: top, h: low - top };
+      r.center = true;
     }
   }
   // Ícone sozinho dentro de um quadrado/círculo: a célula é o quadrado.
@@ -1763,6 +1792,24 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
         if (r === sp.r0) {
           const cellBox = { x: x0, y: ys[sp.r0], w: width, h: ys[sp.r1] - ys[sp.r0] };
           let children: OutIR[];
+          if (cont.card && cont.node.k === 'box') {
+            const card = cont.node;
+            const pad = cellPadding(card.box, card.pad ?? [0, 0, 0, 0], card.kids);
+            const inner = { x: card.box.x + pad[3], y: card.box.y + pad[0], w: card.box.w - pad[1] - pad[3], h: card.box.h - pad[0] - pad[2] };
+            const kids = await renderRegion(card.kids, inner, ctx);
+            const lay = card.layout;
+            cells.push({
+              width,
+              fill: card.fill,
+              borders: { ...bordersFor(x0, x1, ys[sp.r0], ys[sp.r1]), ...(card.border as CellIR['borders']) },
+              margins: [pad[0], Math.max(0, pad[1] + (x1 - right(card.box))), pad[2], Math.max(0, pad[3] + (card.box.x - x0))],
+              vmerge: sp.r1 - sp.r0 > 1 ? 'restart' : undefined,
+              vAlign: lay && (/column/.test(lay.dir) ? lay.justify === 'center' : /flex|grid/.test(lay.display) && lay.alignItems === 'center') ? 'center' : 'top',
+              children: kids.length ? kids : [{ kind: 'p', runs: [] }],
+            });
+            c = sp.c1;
+            continue;
+          }
           if (cont.node.k === 'text') {
             children = textToParagraphs(cont.node, cellBox, ctx);
           } else {
@@ -1772,6 +1819,10 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
           const top = Math.max(0, cont.box.y - cellBox.y);
           if (!cont.center && top > 0.5) children = withGap(children, top);
           cells.push({ width, fill, borders, vmerge: sp.r1 - sp.r0 > 1 ? 'restart' : undefined, vAlign: cont.center ? 'center' : 'top', children });
+        } else if (cont.card && cont.node.k === 'box') {
+          const cb = (cont.node.border ?? {}) as NonNullable<CellIR['borders']>;
+          const last = r === sp.r1 - 1;
+          cells.push({ width, fill: cont.node.fill, borders: { left: cb.left, right: cb.right, ...(last ? { bottom: cb.bottom } : {}) }, vmerge: 'continue', children: [] });
         } else {
           cells.push({ width, fill, borders, vmerge: 'continue', children: [] });
         }
@@ -1989,6 +2040,9 @@ const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean
 const border = (b?: { w: number; color: string }): IBorderOptions =>
   b ? { style: BorderStyle.SINGLE, size: Math.max(2, Math.round(b.w * 6)), color: b.color } : { style: BorderStyle.NONE, size: 0, color: 'auto' };
 
+const cellBorder = (b?: { w: number; color: string }): IBorderOptions =>
+  b ? border(b) : { style: BorderStyle.NIL, size: 0, color: 'auto' };
+
 const toBlocks = (items: OutIR[], body = false): (Paragraph | Table)[] => {
   const out: (Paragraph | Table)[] = [];
   items.forEach((item, i) => {
@@ -2085,8 +2139,10 @@ const toTable = (t: TIR): Table => {
                 ? { top: 0, right: tw(cell.margins[1]), bottom: 0, left: tw(cell.margins[3]), marginUnitType: WidthType.DXA }
                 : undefined,
               verticalAlign: cell.vAlign === 'center' && (!cell.backdrop || (cell.backdrop.center && cell.vAlign === 'center')) ? VerticalAlign.CENTER : cell.vAlign === 'bottom' ? VerticalAlign.BOTTOM : VerticalAlign.TOP,
+              // Lado sem borda fica "não definido" (nil): "nenhuma" explícita na
+              // célula vizinha apagava a borda do card ao lado no Word.
               borders: {
-                top: border(cell.borders?.top), bottom: border(cell.borders?.bottom), left: border(cell.borders?.left), right: border(cell.borders?.right),
+                top: cellBorder(cell.borders?.top), bottom: cellBorder(cell.borders?.bottom), left: cellBorder(cell.borders?.left), right: cellBorder(cell.borders?.right),
               },
               children,
             });
@@ -2412,9 +2468,9 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     // Depois da capa a próxima seção já começa em página nova (abaixo): a quebra
     // aqui, com a capa cheia até o pé, caía na página seguinte e deixava uma em branco.
     // Próxima seção é capa: ela já começa em página nova (seção "próxima página").
-    if (gi < groups.length - 1 && groups[gi + 1].bg !== group.bg && !group.bg.startsWith('cover:') && !groups[gi + 1].bg.startsWith('cover:')) {
-      body.push({ kind: 'p', runs: [], pageBreakBefore: true, line: { value: MIN_LINE, rule: 'exact' } });
-    }
+    // (Fundo mudou: a seção seguinte começa em página nova sozinha — ver tipo
+    // de seção abaixo. Quebra + seção contínua deixava a 1ª página da seção
+    // nova com o cabeçalho da anterior: o título do anexo sumia.)
 
     const logosHere = headerImages;
     headerImages = [];
@@ -2512,7 +2568,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     }
     return {
       properties: {
-        type: sec.gi === 0 || groups[sec.gi - 1].bg.startsWith('cover:') || groups[sec.gi].bg.startsWith('cover:') ? SectionType.NEXT_PAGE : SectionType.CONTINUOUS,
+        type: sec.gi === 0 || groups[sec.gi - 1].bg !== groups[sec.gi].bg ? SectionType.NEXT_PAGE : SectionType.CONTINUOUS,
         ...(overflowChildren ? { titlePage: true } : {}),
         page: {
           size: { width: tw(pageW), height: tw(pageH) },
