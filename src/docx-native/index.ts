@@ -96,7 +96,7 @@ const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData
       const set = (e, v) => { if (!e.hasAttribute('data-dx-vis')) e.setAttribute('data-dx-vis', e.style.visibility); e.style.visibility = v; };
       for (const e of document.querySelectorAll('body *')) set(e, 'hidden');
       set(target, 'visible');
-      for (const e of target.querySelectorAll('*')) set(e, ${alone} && !e.closest('[data-dx-baked]') ? 'hidden' : 'visible');
+      for (const e of target.querySelectorAll('*')) set(e, ${alone} ? 'hidden' : 'visible');
       // A página do PDF força "html, body { background: white !important }": só inline !important ganha.
       for (const e of [document.documentElement, document.body]) { e.setAttribute('data-dx-bg', e.style.background); e.style.setProperty('background', 'transparent', 'important'); }
       if (${mode === 'notext'}) {
@@ -166,7 +166,15 @@ const coverPagesOf = (layout: DocumentLayout): Set<number> => {
   const { pages } = layout;
   for (const p of pages) {
     const blocks = layout.blocks.filter((b) => b.page === p.index && b.tree);
-    if (blocks.length === 1 && blocks[0].box.h >= layout.meta.pageHeightPx * 0.9) covers.add(p.index);
+    // Bloco do tamanho da página só é capa se tiver arte grande (imagem de
+    // fundo/ilustração): um Sumário feito de textos e linhas vira tabela.
+    const art = (t: import('./layout.js').LayoutNode | null): number => {
+      if (!t) return 0;
+      const own = t.k === 'img' || t.k === 'raster' || (t.k !== 'text' && (t.bgImage || t.paint)) ? t.box.w * t.box.h : 0;
+      return Math.max(own, ...(t.k === 'box' ? t.kids.map(art) : [0]));
+    };
+    const pageArea = layout.meta.pageWidthPx * layout.meta.pageHeightPx;
+    if (blocks.length === 1 && blocks[0].box.h >= layout.meta.pageHeightPx * 0.9 && art(blocks[0].tree) >= 0.3 * pageArea) covers.add(p.index);
   }
   const ownBackground = (i: number, neighbour: number) =>
     pages[i]?.bgImage && pages[neighbour] && pages[i].bgImage !== pages[neighbour].bgImage;
