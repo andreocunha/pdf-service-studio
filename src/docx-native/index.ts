@@ -166,7 +166,15 @@ const coverPagesOf = (layout: DocumentLayout): Set<number> => {
   const { pages } = layout;
   for (const p of pages) {
     const blocks = layout.blocks.filter((b) => b.page === p.index && b.tree);
-    if (blocks.length === 1 && blocks[0].box.h >= layout.meta.pageHeightPx * 0.9) covers.add(p.index);
+    // Bloco do tamanho da página só é capa se tiver arte grande (imagem de
+    // fundo/ilustração): um Sumário feito de textos e linhas vira tabela.
+    const art = (t: import('./layout.js').LayoutNode | null): number => {
+      if (!t) return 0;
+      const own = t.k === 'img' || t.k === 'raster' || (t.k !== 'text' && (t.bgImage || t.paint)) ? t.box.w * t.box.h : 0;
+      return Math.max(own, ...(t.k === 'box' ? t.kids.map(art) : [0]));
+    };
+    const pageArea = layout.meta.pageWidthPx * layout.meta.pageHeightPx;
+    if (blocks.length === 1 && blocks[0].box.h >= layout.meta.pageHeightPx * 0.9 && art(blocks[0].tree) >= 0.3 * pageArea) covers.add(p.index);
   }
   const ownBackground = (i: number, neighbour: number) =>
     pages[i]?.bgImage && pages[neighbour] && pages[i].bgImage !== pages[neighbour].bgImage;

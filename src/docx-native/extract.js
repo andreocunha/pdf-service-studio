@@ -88,6 +88,9 @@
     if (Object.keys(b).length) d.border = b;
     const pad = ['Top', 'Right', 'Bottom', 'Left'].map((s) => parseFloat(cs[`padding${s}`]) || 0);
     if (pad.some((v) => v > 0)) d.pad = pad;
+    // Raio (o maior canto): círculo pequeno com ícone/texto vai como imagem redonda.
+    const radius = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => parseFloat(cs[`border${c}Radius`]) || 0));
+    if (radius > 0.5) d.radius = radius;
     // Sombra é ignorada: o fundo vai no preenchimento da tabela (padrão da equipe).
     return d;
   };

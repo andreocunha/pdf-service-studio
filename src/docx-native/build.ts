@@ -27,7 +27,6 @@ import {
   LevelFormat,
   LevelSuffix,
   LineRuleType,
-  PageBreak,
   Paragraph,
   SectionType,
   Table,
@@ -113,7 +112,8 @@ type CellIR = {
   vmerge?: 'restart' | 'continue';
   children: OutIR[];
 };
-type TIR = { kind: 't'; width: number; indent: number; rows: { height?: number; cells: CellIR[] }[] };
+type TIRRow = { height?: number; cells: CellIR[]; exact?: boolean };
+type TIR = { kind: 't'; width: number; indent: number; rows: TIRRow[] };
 type OutIR = PIR | TIR;
 
 // ---------------------------------------------------------------------------
@@ -347,6 +347,25 @@ const unwrap = (t: TIR): TIR => {
     });
     return { ...r, cells };
   });
+  // Grade de várias linhas (composição do Figma): o espaço interno da caixa
+  // de fora vira uma linha vazia em cima e outra embaixo — somado à primeira
+  // linha, esticava junto as peças mescladas dela (os quadrados da "soma").
+  if (inner.rows.length > 1 && (mt >= 1 || mb >= 1)) {
+    const padRowOf = (h: number, side: 'top' | 'bottom'): TIRRow => ({
+      height: h,
+      exact: true,
+      cells: [{ width: outer.width, fill: outer.fill, borders: { left: b.left, right: b.right, ...(side === 'top' ? { top: b.top } : { bottom: b.bottom }) }, children: [] }],
+    });
+    for (const [ri, r] of rows.entries()) {
+      for (const c of r.cells) {
+        if (ri === 0 && c.borders) delete c.borders.top;
+        if (ri === rows.length - 1 && c.borders) delete c.borders.bottom;
+        if (c.margins) c.margins = [c.margins[0] - (ri === 0 ? mt : 0), c.margins[1], c.margins[2] - (ri === rows.length - 1 ? mb : 0), c.margins[3]];
+        if (c.backdrop && ri === 0 && mt) c.backdrop = { ...c.backdrop, y: (c.backdrop.y ?? 0) - mt };
+      }
+    }
+    return { ...t, rows: [...(mt >= 1 ? [padRowOf(mt, 'top')] : []), ...rows, ...(mb >= 1 ? [padRowOf(mb, 'bottom')] : [])] };
+  }
   // A altura de cada linha inclui o espaço de cima/baixo que veio da caixa de
   // fora (vira espaçamento de parágrafo): sem isso a soma das linhas ficava
   // menor que a real e quem completa a altura (flattenGrid) esticava demais.
@@ -637,6 +656,33 @@ const releaseTail = (items: OutIR[]) => {
   }
 };
 
+/** Encolhe as linhas sem texto da tabela até a soma das alturas caber em `avail`. */
+const fitRows = (t: TIR, avail: number) => {
+  // Folga embaixo do slide: o espaço interno de baixo da última linha
+  // encolhe (o texto do Word é um pouco maior e o slide transbordava).
+  const last = t.rows[t.rows.length - 1];
+  for (const c of last?.cells ?? []) if (c.margins && c.margins[2] > 8) c.margins = [c.margins[0], c.margins[1], Math.max(8, c.margins[2] - 24), c.margins[3]];
+  const total = t.rows.reduce((a, r) => a + (r.height ?? 0), 0);
+  let excess = total - avail;
+  if (excess <= 0) return;
+  const textless = t.rows.filter((r) => !r.cells.some((c) => allParagraphs(c.children).some((p) => p.runs.some((x) => x.kind === 'text'))));
+  const room = textless.reduce((a, r) => a + Math.max(0, (r.height ?? 0) - 2), 0);
+  const k = room ? Math.min(1, excess / room) : 0;
+  for (const r of textless) {
+    const cut = Math.max(0, (r.height ?? 0) - 2) * k;
+    r.height = (r.height ?? 0) - cut;
+    r.exact = true;
+    excess -= cut;
+  }
+  // Ainda passa (linha única com texto, o slide inteiro): a altura mínima
+  // das linhas com texto diminui — o conteúdo é que manda ("pelo menos").
+  if (excess > 0.5) {
+    const rest = t.rows.filter((r) => !textless.includes(r) && (r.height ?? 0) > 0);
+    const sum = rest.reduce((a, r) => a + (r.height ?? 0), 0);
+    for (const r of rest) r.height = Math.max(1, (r.height ?? 0) - (excess * (r.height ?? 0)) / sum);
+  }
+};
+
 const leaves = (nodes: LayoutNode[]): LayoutNode[] =>
   nodes.flatMap((n) => (n.k === 'box' && !decorated(n) && !n.bgImage ? leaves(n.kids) : [n]));
 
@@ -834,6 +880,9 @@ const complexRoot = (n: LayoutNode): boolean => {
   const drawing = (k: LayoutNode): boolean =>
     k.k === 'img' || k.k === 'raster' || (k.k === 'shape' && !isLine(k)) || (k.k === 'box' && !hasText(k) && k.kids.length > 0);
   if (kids.length >= 3 && kids.every((k) => k.abs) && kids.some(hasText) && kids.filter(drawing).length >= 2) return true;
+  // Sumário montado no Figma: textos soltos com linhas finas embaixo — grade
+  // única, linhas como borda de baixo (antes viravam parágrafos soltos).
+  if (kids.length >= 3 && kids.every((k) => k.abs) && kids.some(hasText) && kids.filter(isLine).length >= 2) return true;
   // Vazamento só conta pra desenho (ícone de 80px num título de 22px); texto
   // posicionado fora da caixa é só o jeito do Figma de posicionar.
   return kids.some((k) => k.abs && !hasText(k) && overflow(k.box, n.box) > Math.max(16, 0.4 * Math.min(k.box.w, k.box.h)));
@@ -1538,6 +1587,16 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
       fail = true;
       return;
     }
+    // Círculo pequeno com ícone ou texto curto ("até", "+"): imagem redonda
+    // na sua célula — célula de tabela não arredonda.
+    const round = (k: LayoutNode) =>
+      (k.k === 'shape' || k.k === 'box') && (k.radius ?? 0) >= 0.45 * Math.min(k.box.w, k.box.h) && Boolean((k as { fill?: string }).fill);
+    const shortText = everyNode(n).filter((k) => k.k === 'text').reduce((a, k) => a + (k.k === 'text' ? k.paras.reduce((b, p) => b + p.runs.reduce((c, r) => c + (r.t?.length ?? 0), 0), 0) : 0), 0) <= 6;
+    const squarish = Math.abs(n.box.w - n.box.h) <= 0.15 * Math.max(n.box.w, n.box.h);
+    if (shortText && squarish && n.box.w <= 64 && (round(n) || n.kids.some((k) => round(k) && k.box.w * k.box.h >= 0.8 * n.box.w * n.box.h))) {
+      contents.push({ node: { k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, box: n.box, span: n.box, center: false });
+      return;
+    }
     // Desenho feito de imagens sobrepostas (pino + ícone dentro): uma
     // imagem só, na sua célula.
     if (!hasText(n) && !decorated(n)) {
@@ -1612,7 +1671,7 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
 
   const snap = (vals: number[]) => {
     const out: number[] = [];
-    for (const v of vals.sort((a, b) => a - b)) if (!out.length || v - out[out.length - 1] > 1.5) out.push(v);
+    for (const v of vals.filter(Number.isFinite).sort((a, b) => a - b)) if (!out.length || v - out[out.length - 1] > 1.5) out.push(v);
     return out;
   };
   const xs = snap([L, R, ...contents.map((c) => clampX(c.span.x)), ...rects.flatMap((r) => [clampX(r.box.x), clampX(right(r.box))])]);
@@ -1633,6 +1692,24 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
     const r1 = Math.max(r0 + 1, upTo(ys, bottom(c.span)));
     return { c0, c1, r0, r1 };
   });
+  // Texto de uma linha avança pelas colunas livres ao lado até ter folga (o
+  // Word desenha um pouco mais largo e quebraria "O QUE NÃO É ACEITO…").
+  let extendR = 0;
+  const taken = (r: number, c: number) => spans.some((o) => r >= o.r0 && r < o.r1 && c >= o.c0 && c < o.c1);
+  spans.forEach((sp, k) => {
+    const n = contents[k].node;
+    if (n.k !== 'text' || n.paras.length !== 1 || n.box.h > (n.paras[0].lineHeight ?? n.paras[0].fontSize * 1.2) * 1.5) return;
+    const want = n.box.w * 1.12 + 6;
+    while (sp.c1 < nc && xs[sp.c1] - xs[sp.c0] < want) {
+      let free = true;
+      for (let r = sp.r0; r < sp.r1; r++) if (taken(r, sp.c1)) free = false;
+      if (!free) break;
+      sp.c1++;
+    }
+    // Encostado na margem: a tabela avança até 24px na margem direita.
+    if (sp.c1 === nc) extendR = Math.max(extendR, Math.min(24, want - (xs[nc] - xs[sp.c0])));
+  });
+  if (extendR > 0) xs[nc] += extendR;
   // Se o próximo corte ficou ocupado (conteúdo encostado), encolhe até ele.
   for (const [k, sp] of spans.entries()) {
     for (let r = sp.r0; r < sp.r1; r++) {
@@ -1677,7 +1754,11 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
         const x1 = xs[sp.c1];
         const width = x1 - x0;
         const cont = contents[k];
-        const fill = fillAt(cont.span.x + cont.span.w / 2, cont.span.y + cont.span.h / 2);
+        // Fundo da célula: o retângulo que contém a peça inteira (a barra fina
+        // atrás de um "+" redondo não pinta a célula dele de cinza).
+        const fill = cont.center
+          ? fillAt(cont.span.x + cont.span.w / 2, cont.span.y + cont.span.h / 2)
+          : rects.filter((q) => q.fill && contains(q.box, cont.span)).sort((a, b) => b.z - a.z)[0]?.fill;
         const borders = bordersFor(x0, x1, ys[sp.r0], ys[sp.r1]);
         if (r === sp.r0) {
           const cellBox = { x: x0, y: ys[sp.r0], w: width, h: ys[sp.r1] - ys[sp.r0] };
@@ -1707,9 +1788,14 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
       cells.push({ width: xs[c2] - x0, fill, borders: bordersFor(x0, xs[c2], y0, y1), children: [] });
       c = c2;
     }
-    rows.push({ height: y1 - y0, cells });
+    // Linha só de cor/imagem (barra de 8px, borda de quadrado): altura
+    // exata — o Word do Windows esticava essas linhas finas. Linha com texto
+    // fica "pelo menos" (cresce se alguém digitar).
+    const hasRunText = cells.some((c) => allParagraphs(c.children).some((p) => p.runs.some((r) => r.kind === 'text')));
+    const startsText = contents.some((cc, k) => cc.node.k === 'text' && spans[k].r0 <= r && spans[k].r1 > r);
+    rows.push({ height: y1 - y0, cells, exact: !hasRunText && !startsText });
   }
-  return [{ kind: 't', width: R - L, indent: L - region.x, rows }];
+  return [{ kind: 't', width: xs[nc] - L, indent: L - region.x, rows }];
 };
 
 const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<OutIR[]> => {
@@ -1834,7 +1920,10 @@ const toParagraph = (p: PIR): Paragraph => {
   const children = toRuns(p);
   const body = p.bookmark ? [new Bookmark({ id: p.bookmark, children })] : children;
   return new Paragraph({
-    children: p.pageBreakBefore ? [new PageBreak(), ...body] : body,
+    // Propriedade "quebra de página antes" (não um caractere de quebra): se a
+    // página anterior já encheu, não sobra uma página em branco.
+    children: body,
+    pageBreakBefore: p.pageBreakBefore || undefined,
     alignment:
       p.align === 'center' ? AlignmentType.CENTER : p.align === 'right' ? AlignmentType.RIGHT : p.align === 'both' ? AlignmentType.JUSTIFIED : AlignmentType.LEFT,
     indent:
@@ -1946,7 +2035,7 @@ const toTable = (t: TIR): Table => {
       (row) =>
         new TableRow({
           cantSplit: true,
-          height: row.height ? { value: tw(Math.max(1, row.height)), rule: HeightRule.ATLEAST } : undefined,
+          height: row.height ? { value: tw(Math.max(1, row.height)), rule: row.exact ? HeightRule.EXACT : HeightRule.ATLEAST } : undefined,
           children: row.cells.map((cell, ci) => {
             const from = row.cells.slice(0, ci).reduce((a, c) => a + tw(c.width), 0);
             const span = spanOf(from, from + tw(cell.width));
@@ -2275,6 +2364,13 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           // Vão pequeno (linhas de um quadro, 8px): não é espaço entre tópicos — fica exato.
           placed = n ? [...blanks, ...out] : withGap(out, Math.max(0, gap));
         }
+        // Bloco do tamanho da página (slide): a tabela tem que caber na área
+        // útil — encolhe só as linhas sem texto (margens, vãos). Se passar
+        // por pouco, o Word joga o resto numa página em branco.
+        if (area.h >= pageH * 0.85) {
+          const avail = pageH - marginTop - Math.max(0, pad.bottom - 20) - 16;
+          for (const item of placed) if (item.kind === 't') fitRows(item, avail);
+        }
         markHeadings(block, placed);
         // No Studio um bloco não se parte entre páginas (vai inteiro pra
         // próxima): "manter com o próximo" em tudo menos no fim do bloco.
@@ -2308,11 +2404,15 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
       }
     }
     if (!body.length) body.push({ kind: 'p', runs: [] });
+    // Fim do documento depois de tabela: o Word põe um parágrafo do corpo que
+    // não cabe embaixo de um slide cheio (página em branco no final).
+    if (gi === groups.length - 1 && body[body.length - 1]?.kind === 't') body.push({ kind: 'p', runs: [], tiny: true });
     // Guia da Lex: quebra de página + seção contínua (nunca seção "próxima
     // página") quando o fundo muda; só a aba do menu mudou → seção contínua.
     // Depois da capa a próxima seção já começa em página nova (abaixo): a quebra
     // aqui, com a capa cheia até o pé, caía na página seguinte e deixava uma em branco.
-    if (gi < groups.length - 1 && groups[gi + 1].bg !== group.bg && !group.bg.startsWith('cover:')) {
+    // Próxima seção é capa: ela já começa em página nova (seção "próxima página").
+    if (gi < groups.length - 1 && groups[gi + 1].bg !== group.bg && !group.bg.startsWith('cover:') && !groups[gi + 1].bg.startsWith('cover:')) {
       body.push({ kind: 'p', runs: [], pageBreakBefore: true, line: { value: MIN_LINE, rule: 'exact' } });
     }
 
@@ -2412,7 +2512,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     }
     return {
       properties: {
-        type: sec.gi === 0 || groups[sec.gi - 1].bg.startsWith('cover:') ? SectionType.NEXT_PAGE : SectionType.CONTINUOUS,
+        type: sec.gi === 0 || groups[sec.gi - 1].bg.startsWith('cover:') || groups[sec.gi].bg.startsWith('cover:') ? SectionType.NEXT_PAGE : SectionType.CONTINUOUS,
         ...(overflowChildren ? { titlePage: true } : {}),
         page: {
           size: { width: tw(pageW), height: tw(pageH) },

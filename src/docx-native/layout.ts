@@ -44,6 +44,8 @@ type Deco = {
   bgImage?: string;
   border?: Partial<Record<'top' | 'right' | 'bottom' | 'left', Border>>;
   pad?: [number, number, number, number];
+  /** Maior raio de canto (px). */
+  radius?: number;
   /** Pintura que o Word não tem (gradiente, sombra, imagem): vai capturada, atrás do texto. */
   paint?: boolean;
   abs?: boolean;
