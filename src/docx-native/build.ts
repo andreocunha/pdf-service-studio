@@ -2406,7 +2406,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   let pageOffsets: { current: number; total: number } | null = null;
   // Onde o conteúdo anterior terminou. Atravessa a troca de seção contínua (só
   // a aba do menu mudou): o vão é o do Studio, não a distância do topo da página.
-  let cursor: { page: number; y: number } | null = null;
+  let cursor: { page: number; y: number; slide: boolean } | null = null;
   // Espaço entre tópicos em linhas em branco do corpo de texto (guia da Lex:
   // "manter o espaçamento definido no corpo"), não em px quebrados do Figma.
   // Arredonda pra baixo (só sobe com folga): arredondar 1,6 linha pra 2 em
@@ -2499,20 +2499,23 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
             : await renderRegion([tree], region, ctx),
         );
         let placed: OutIR[];
+        const slide = area.h >= pageH * 0.85;
         if (!cursor) {
           // Primeiro bloco da página: a distância do topo continua exata.
           trimTop(out, pageTop(block.page) + marginTop - area.y);
           placed = withGap(out, Math.max(0, area.y - (pageTop(block.page) + marginTop)));
-        } else if (cursor.page !== block.page) {
-          // Mudou de página no Studio: quebra de página no Word também, com o
-          // bloco na mesma distância do topo. Deixar o texto correr fazia um
-          // bloco que não se parte (cards) cair na página seguinte e empurrar
-          // o documento inteiro (efeito dominó).
+        } else if (cursor.page !== block.page && (slide || cursor.slide)) {
+          // Slide (bloco do tamanho da página): cada um na sua folha.
           const top = Math.max(0, area.y - (pageTop(block.page) + marginTop));
           trimTop(out, pageTop(block.page) + marginTop - area.y);
           placed = [{ kind: 'p', runs: [], pageBreakBefore: true, tiny: true }, ...withGap(out, top)];
         } else {
-          const gap = area.y - cursor.y;
+          // Mudou de página no Studio num documento de texto: o conteúdo corre
+          // (sem "quebrar página antes" — apagar texto no Word não subia o
+          // resto). O vão é a distância do bloco ao topo da página dele — no
+          // mínimo uma linha em branco (no topo da folha o Studio não mostra o
+          // espaço entre tópicos, e no Word o bloco colava no anterior).
+          const gap = cursor.page !== block.page ? Math.max(bodyLine, area.y - (pageTop(block.page) + marginTop)) : area.y - cursor.y;
           const n = blanksFor(gap);
           const blanks: PIR[] = Array.from({ length: n }, () => ({ kind: 'p', runs: [], blank: true }));
           // Vão pequeno (linhas de um quadro, 8px): não é espaço entre tópicos — fica exato.
@@ -2521,7 +2524,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         // Bloco do tamanho da página (slide): a tabela tem que caber na área
         // útil — encolhe só as linhas sem texto (margens, vãos). Se passar
         // por pouco, o Word joga o resto numa página em branco.
-        if (area.h >= pageH * 0.85) {
+        if (slide) {
           const avail = pageH - marginTop - Math.max(0, pad.bottom - 20) - 16;
           for (const item of placed) if (item.kind === 't') fitRows(item, avail);
         }
@@ -2536,7 +2539,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           if (p) targets.set(joined.blockId, p);
         }
         body.push(...placed);
-        cursor = { page: (joined ?? block).page, y: bottom(area) };
+        cursor = { page: (joined ?? block).page, y: bottom(area), slide };
       }
     }
     if (!body.length) body.push({ kind: 'p', runs: [] });
