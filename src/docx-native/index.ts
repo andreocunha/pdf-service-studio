@@ -164,21 +164,25 @@ const pageFields = (xml: string, offsets: { current: number; total: number } | n
 const coverPagesOf = (layout: DocumentLayout): Set<number> => {
   const covers = new Set<number>();
   const { pages } = layout;
+  const art = (t: import('./layout.js').LayoutNode | null): number => {
+    if (!t) return 0;
+    const own = t.k === 'img' || t.k === 'raster' || (t.k !== 'text' && (t.bgImage || t.paint)) ? t.box.w * t.box.h : 0;
+    return Math.max(own, ...(t.k === 'box' ? t.kids.map(art) : [0]));
+  };
+  const pageArea = layout.meta.pageWidthPx * layout.meta.pageHeightPx;
   for (const p of pages) {
     const blocks = layout.blocks.filter((b) => b.page === p.index && b.tree);
     // Bloco do tamanho da página só é capa se tiver arte grande (imagem de
     // fundo/ilustração): um Sumário feito de textos e linhas vira tabela.
-    const art = (t: import('./layout.js').LayoutNode | null): number => {
-      if (!t) return 0;
-      const own = t.k === 'img' || t.k === 'raster' || (t.k !== 'text' && (t.bgImage || t.paint)) ? t.box.w * t.box.h : 0;
-      return Math.max(own, ...(t.k === 'box' ? t.kids.map(art) : [0]));
-    };
-    const pageArea = layout.meta.pageWidthPx * layout.meta.pageHeightPx;
     if (blocks.length === 1 && blocks[0].box.h >= layout.meta.pageHeightPx * 0.9 && art(blocks[0].tree) >= 0.3 * pageArea) covers.add(p.index);
   }
   const ownBackground = (i: number, neighbour: number) =>
     pages[i]?.bgImage && pages[neighbour] && pages[i].bgImage !== pages[neighbour].bgImage;
-  if (pages.length > 1 && ownBackground(0, 1)) covers.add(0);
+  // Página com fundo próprio só vira "foto" se o conteúdo tiver arte (imagem
+  // grande): caixas coloridas e texto (Quadro Resumo na capa) vão como tabela
+  // por cima do fundo, acompanhando o texto.
+  const hasArt = (i: number) => layout.blocks.filter((b) => b.page === i).some((b) => art(b.tree) >= 0.15 * pageArea);
+  if (pages.length > 1 && ownBackground(0, 1) && hasArt(0)) covers.add(0);
   // Contracapa só com pouco texto: a última página do anexo, com fundo
   // próprio mas conteúdo corrido, não é capa (ia inteira pro cabeçalho).
   const chars = (i: number) => {
@@ -192,7 +196,7 @@ const coverPagesOf = (layout: DocumentLayout): Set<number> => {
     return n;
   };
   const last = pages.length - 1;
-  if (pages.length > 2 && ownBackground(last, last - 1) && chars(last) <= 150) covers.add(last);
+  if (pages.length > 2 && ownBackground(last, last - 1) && chars(last) <= 150 && hasArt(last)) covers.add(last);
   return covers;
 };
 

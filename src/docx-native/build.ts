@@ -203,7 +203,7 @@ const cellPadding = (box: Box, pad: number[], kids: LayoutNode[]): [number, numb
   // Quando passa do padding (texto "nowrap" vazando), ou texto de uma linha
   // encostado (aba do menu). Texto que quebra linha encostado é o normal —
   // tirar 3px ali fazia caber uma palavra a mais por linha no Word.
-  const oneLine = items.every((n) => n.k !== 'text' || (n.paras.length === 1 && n.box.h < (n.paras[0].lineHeight ?? n.paras[0].fontSize * 1.2) * 1.5));
+  const oneLine = items.every((n) => n.k !== 'text' || isOneLine(n));
   const tight = rightRoom < pad[1] - 0.5 || (oneLine && rightRoom <= pad[1] + 1) ? 3 : 0;
   return [pad[0], Math.max(0, Math.min(pad[1], rightRoom) - tight), pad[2], Math.max(0, Math.min(pad[3], leftRoom))];
 };
@@ -215,12 +215,19 @@ const flatten = (nodes: LayoutNode[]): LayoutNode[] =>
     // Composição ocupa, na vertical, o lugar do conteúdo dela (a coluna de
     // 216px com uma bola de 48px no meio); na horizontal, o lugar dela no
     // fluxo (a bola vaza pros cards vizinhos, mas a coluna tem 24px).
+    if (smallRoundArt(n)) return [n];
     if (complexRoot(n) || rowFlex(n)) {
       const c = union(leaves(n.kids).length ? leaves(n.kids) : [n]);
       return [{ ...n, box: { x: n.box.x, w: n.box.w, y: c.y, h: c.h } }];
     }
     return flatten(n.kids);
   });
+
+const roundish = (k: LayoutNode) =>
+  (k.k === 'box' || k.k === 'shape') && (k.radius ?? 0) >= 0.45 * Math.min(k.box.w, k.box.h) && Boolean((k as { fill?: string }).fill || (k as { border?: object }).border);
+/** Conjunto pequeno de círculos + ícone (círculo amarelo deslocado atrás do branco com contorno): uma imagem só. */
+const smallRoundArt = (n: LayoutNode): boolean =>
+  n.k === 'box' && !hasText(n) && n.box.w <= 90 && n.box.h <= 90 && n.kids.length > 0 && everyNode(n).some((k) => k !== n && roundish(k));
 
 /** Só as folhas e caixas pintadas — a geometria do conteúdo, atravessando tudo. */
 const allParagraphs = (items: OutIR[]): PIR[] =>
@@ -631,14 +638,20 @@ const separate = (items: OutIR[]): OutIR[] =>
  * fonte da marca do tamanho que cabe nele. Quem digita ali (ou aumenta a
  * fonte) empurra a tabela de baixo — altura fixa escondia o texto atrás dela.
  */
-const growGap = (gap: number, from: PIR): PIR => ({
-  kind: 'p',
-  runs: [],
-  keepNext: from.keepNext,
-  bookmark: from.bookmark,
-  line: { value: Math.max(MIN_LINE, tw(gap)), rule: 'atLeast' },
-  grow: Math.max(2, Math.min(144, Math.round((gap / simpleRatio) * 1.5))),
-});
+const growGap = (gap: number, from: PIR): PIR => {
+  // A fonte para em 72pt (~110px de linha): vão maior (capa com o quadro
+  // no pé da página) completa com espaço antes, senão o quadro subia.
+  const most = (144 / 1.5) * simpleRatio;
+  return {
+    kind: 'p',
+    runs: [],
+    keepNext: from.keepNext,
+    bookmark: from.bookmark,
+    spaceBefore: gap > most ? gap - most : undefined,
+    line: { value: Math.max(MIN_LINE, tw(gap)), rule: 'atLeast' },
+    grow: Math.max(2, Math.min(144, Math.round((gap / simpleRatio) * 1.5))),
+  };
+};
 
 /** Tira o "manter com o próximo" do último item (parágrafo, ou última linha da tabela, inteira). */
 const releaseTail = (items: OutIR[]) => {
@@ -681,6 +694,19 @@ const fitRows = (t: TIR, avail: number) => {
     const sum = rest.reduce((a, r) => a + (r.height ?? 0), 0);
     for (const r of rest) r.height = Math.max(1, (r.height ?? 0) - (excess * (r.height ?? 0)) / sum);
   }
+};
+
+/**
+ * Texto de uma linha só no Studio: pelas linhas medidas de cada trecho (a
+ * caixa pode ser mais alta que o texto — rótulo centralizado numa linha de
+ * 41px); sem medida, pela altura.
+ */
+const isOneLine = (n: Extract<LayoutNode, { k: 'text' }>): boolean => {
+  if (n.paras.length !== 1) return false;
+  if (n.paras[0].runs.some((r) => r.br)) return false;
+  const runs = n.paras[0].runs.filter((r) => r.t);
+  if (runs.length && runs.every((r) => r.lines !== undefined)) return runs.every((r) => (r.lines ?? 1) <= 1);
+  return n.box.h < (n.paras[0].lineHeight ?? n.paras[0].fontSize * 1.2) * 1.5;
 };
 
 const leaves = (nodes: LayoutNode[]): LayoutNode[] =>
@@ -1077,7 +1103,8 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
   // vale ela (com folga de 2px pra diferença mínima de métrica). Texto de uma
   // linha fica livre — prender a largura exata quebrava palavra ("Banc|o").
   const lh = node.paras[0]?.lineHeight ?? node.paras[0]?.fontSize * 1.2;
-  const wrapped = node.paras.length > 1 || (lh ? node.box.h > lh * 1.5 : false);
+  const wrapped = !isOneLine(node);
+  void lh;
   const indentRight = wrapped ? Math.max(0, right(region) - right(node.box) - 2) : 0;
   // Uma linha centralizada/à direita: o centro (ou a borda direita) fica onde
   // estava, com folga dos dois lados pra não quebrar se o Word desenhar maior.
@@ -1339,7 +1366,7 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
     // Texto de uma linha (número do sumário, título curto) ocupa a largura
     // exata no Studio; o Word desenha um pouco mais largo e quebraria ("1|1").
     // Folga tirada do vão até a próxima coluna.
-    const oneLine = col.every((n) => leaves([n]).every((l) => l.k !== 'text' || (l.paras.length === 1 && l.box.h < (l.paras[0].lineHeight ?? l.paras[0].fontSize * 1.2) * 1.5)));
+    const oneLine = col.every((n) => leaves([n]).every((l) => l.k !== 'text' || isOneLine(l)));
     const slack = oneLine ? Math.min(width - (right(colBox) - start), 6 + colBox.w * 0.15) : 0;
     const own = i + 1 < cols.length ? Math.max(1, Math.min(width, right(colBox) - start + Math.max(0, slack))) : width;
     const children = await renderRegion(col, { x: start, y: vAlign === 'center' ? colBox.y : rowTop, w: own, h: colBox.h }, ctx);
@@ -1448,7 +1475,13 @@ const badgeRows = (cells: CellIR[], height: number): TIR['rows'] => {
 };
 
 const renderItem = async (n: LayoutNode, region: Box, ctx: Ctx): Promise<OutIR[]> => {
+  if (smallRoundArt(n)) return renderItem({ k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, region, ctx);
   if (complexRoot(n)) return renderComplex(n, region, ctx);
+  // Círculo pequeno só com ícone (contorno redondo): imagem redonda — célula
+  // de tabela não arredonda e saía um quadrado.
+  if (smallRoundArt(n) || ((n.k === 'box' || n.k === 'shape') && !hasText(n) && roundish(n) && n.box.w <= 64 && Math.abs(n.box.w - n.box.h) <= 0.15 * n.box.w)) {
+    return renderItem({ k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, region, ctx);
+  }
   if (n.k === 'box' && rowFlex(n) && !decorated(n)) return [await renderColumns([...n.kids].sort((a, b) => a.box.x - b.box.x).map((k) => [k]), region, ctx, [])];
   if (n.k === 'text') {
     if (decorated(n)) return [await decoratedCell(n, [n], region, ctx)];
@@ -1590,7 +1623,7 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
     // Círculo pequeno com ícone ou texto curto ("até", "+"): imagem redonda
     // na sua célula — célula de tabela não arredonda.
     const round = (k: LayoutNode) =>
-      (k.k === 'shape' || k.k === 'box') && (k.radius ?? 0) >= 0.45 * Math.min(k.box.w, k.box.h) && Boolean((k as { fill?: string }).fill);
+      (k.k === 'shape' || k.k === 'box') && (k.radius ?? 0) >= 0.45 * Math.min(k.box.w, k.box.h) && Boolean((k as { fill?: string }).fill || (k as { border?: object }).border);
     const shortText = everyNode(n).filter((k) => k.k === 'text').reduce((a, k) => a + (k.k === 'text' ? k.paras.reduce((b, p) => b + p.runs.reduce((c, r) => c + (r.t?.length ?? 0), 0), 0) : 0), 0) <= 6;
     const squarish = Math.abs(n.box.w - n.box.h) <= 0.15 * Math.max(n.box.w, n.box.h);
     // Selinho (quadrado/círculo de até 28px com ícone: o "X" e o check das
@@ -1601,6 +1634,10 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
     const circle = shortText && squarish && n.box.w <= 64 && (round(n) || n.kids.some((k) => round(k) && k.box.w * k.box.h >= 0.8 * n.box.w * n.box.h));
     if (badge || circle) {
       contents.push({ node: { k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, box: n.box, span: n.box, center: false, round: circle && !badge });
+      return;
+    }
+    if (n !== tree && smallRoundArt(n)) {
+      contents.push({ node: { k: 'raster', id: n.id, box: n.box, abs: n.abs } as LayoutNode, box: n.box, span: n.box, center: false });
       return;
     }
     // Desenho feito de imagens sobrepostas (pino + ícone dentro): uma
@@ -1727,7 +1764,7 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
   const taken = (r: number, c: number) => spans.some((o) => r >= o.r0 && r < o.r1 && c >= o.c0 && c < o.c1);
   spans.forEach((sp, k) => {
     const n = contents[k].node;
-    if (n.k !== 'text' || n.paras.length !== 1 || n.box.h > (n.paras[0].lineHeight ?? n.paras[0].fontSize * 1.2) * 1.5) return;
+    if (n.k !== 'text' || !isOneLine(n)) return;
     const want = n.box.w * 1.12 + 6;
     while (sp.c1 < nc && xs[sp.c1] - xs[sp.c0] < want) {
       let free = true;
@@ -2173,7 +2210,9 @@ const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: num
   const offsets = { current: current - (pageIndex + 1), total: total - layout.pages.length };
   const numFace = ctx.fonts.resolve(num.style.font, num.style.weight, num.style.italic);
   if (numFace) ctx.used.add(numFace);
-  const textW = Math.max(1, num.box.x - pad.left);
+  // Número com folga (o Word desenha "06/09" um pouco mais largo e quebrava).
+  const numW = num.box.w + 12;
+  const textW = Math.max(1, num.box.x - 12 - pad.left);
   const region = { x: pad.left, y: 0, w: textW, h: 0 };
   const text = footer.text ? textToParagraphs({ ...footer.text, box: { ...footer.text.box, x: pad.left } }, region, ctx) : [];
   const numberParagraph: PIR = {
@@ -2183,11 +2222,11 @@ const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: num
   };
   const table: TIR = {
     kind: 't',
-    width: textW + num.box.w,
+    width: textW + numW,
     indent: 0,
     rows: [{ cells: [
       { width: textW, vAlign: 'bottom', children: text.length ? text : [{ kind: 'p', runs: [] }] },
-      { width: num.box.w, vAlign: 'bottom', children: [numberParagraph] },
+      { width: numW, vAlign: 'bottom', children: [numberParagraph] },
     ] }],
   };
   const lowest = Math.max(bottom(num.box), footer.text ? bottom(footer.text.box) : 0);
