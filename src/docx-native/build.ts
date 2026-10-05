@@ -87,7 +87,6 @@ type PIR = {
   mark?: { run: Run; face: Face | null };
   heading?: 1 | 2 | 3;
   /** Mantém com o próximo (título de capítulo não fica sozinho no pé da página). */
-  keepNext?: boolean;
   spacer?: number;
   /** Parágrafo que só segura imagem: fonte mínima na marca (sem folga de descendente). */
   tiny?: boolean;
@@ -647,28 +646,11 @@ const growGap = (gap: number, from: PIR): PIR => {
   return {
     kind: 'p',
     runs: [],
-    keepNext: from.keepNext,
     bookmark: from.bookmark,
     spaceBefore: gap > most ? gap - most : undefined,
     line: { value: Math.max(MIN_LINE, tw(gap)), rule: 'atLeast' },
     grow: Math.max(2, Math.min(144, Math.round((gap / simpleRatio) * 1.5))),
   };
-};
-
-/** Tira o "manter com o próximo" do último item (parágrafo, ou última linha da tabela, inteira). */
-const releaseTail = (items: OutIR[]) => {
-  const last = items[items.length - 1];
-  if (!last) return;
-  if (last.kind === 'p') {
-    last.keepNext = false;
-    return;
-  }
-  const row = last.rows[last.rows.length - 1];
-  for (const c of row.cells) for (const p of allParagraphs(c.children)) p.keepNext = false;
-  // Linha de cima mesclada com essa (selo + texto): também solta.
-  if (row.cells.some((c) => c.vmerge === 'continue') && last.rows.length > 1) {
-    for (const c of last.rows[last.rows.length - 2].cells) for (const p of allParagraphs(c.children)) p.keepNext = false;
-  }
 };
 
 /** Encolhe as linhas sem texto da tabela até a soma das alturas caber em `avail`. */
@@ -1400,20 +1382,21 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
       if (gapRight >= 1) cells.push({ width: gapRight, children: [{ kind: 'p', runs: [] }], gap: true });
       continue;
     }
-    // Desenho mais largo que a coluna (a bola da seta, que no Studio invade
-    // os dois cards): uma imagem só, no tamanho dele — a coluna cresce
-    // tirando dos vizinhos. Recortada, a bola sumia e a seta saía espremida.
-    const art = only && !hasText(only) && leaves(col).length ? union(leaves(col)) : null;
-    if (only && art && art.w > width + 1) {
-      const image = await ctx.assets.backdrop(only.id, art);
-      if (image) {
-        const vAlign = alignOf(art);
-        cells.push({
-          width,
-          want: art.w,
-          vAlign,
-          children: [{ kind: 'p', runs: [{ kind: 'img', image, w: art.w, h: art.h }], align: 'center', spaceBefore: vAlign === 'center' ? undefined : art.y - rowTop, line: { value: tw(art.h), rule: 'atLeast' }, tiny: true }],
-        });
+    // Coluna estreita só com desenho (a seta entre dois cards): a bola que no
+    // Studio invade os cards não cabe no Word sem flutuar — sai; a seta fica
+    // no tamanho dela, e a coluna cresce só o que ela precisa (tirando dos
+    // vizinhos). Recortada junto com a bola, a seta saía espremida; com a
+    // bola inteira, o vão ficava o dobro do Studio.
+    const marks = only && !hasText(only) ? leaves(col).filter((l) => !(l.k === 'shape' && l.box.w > width + 1)) : [];
+    const mark = marks.length === 1 && marks[0].k === 'img' ? marks[0] : null;
+    if (only && mark && leaves(col).length > 1) {
+      const vAlign = alignOf(mark.box);
+      const [image] = await renderItem(mark, { x: mark.box.x, y: rowTop, w: mark.box.w, h: rowBottom - rowTop }, ctx);
+      if (image?.kind === 'p') {
+        image.align = 'center';
+        image.indentLeft = 0;
+        image.spaceBefore = vAlign === 'center' ? undefined : mark.box.y - rowTop;
+        cells.push({ width, want: mark.box.w + 4, vAlign, children: [image] });
         continue;
       }
     }
@@ -2073,7 +2056,7 @@ const structural = (p: PIR): number | undefined => {
 };
 
 const toParagraph = (p: PIR): Paragraph => {
-  if (p.blank) return new Paragraph({ keepNext: p.keepNext || undefined, children: p.bookmark ? [new Bookmark({ id: p.bookmark, children: [] })] : [] });
+  if (p.blank) return new Paragraph({ children: p.bookmark ? [new Bookmark({ id: p.bookmark, children: [] })] : [] });
   const children = toRuns(p);
   const body = p.bookmark ? [new Bookmark({ id: p.bookmark, children })] : children;
   return new Paragraph({
@@ -2108,7 +2091,6 @@ const toParagraph = (p: PIR): Paragraph => {
     // do tamanho da fonte da marca — do tamanho do espaço do Studio.
     run: p.mark ? runProps(p.mark.run, p.mark.face) : structural(p) !== undefined ? { size: structural(p) } : undefined,
     heading: p.heading ? [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3][p.heading - 1] : undefined,
-    keepNext: p.keepNext || undefined,
     shading: p.shade ? { fill: p.shade, color: 'auto', type: 'clear' as never } : undefined,
   });
 };
@@ -2120,9 +2102,8 @@ const toParagraph = (p: PIR): Paragraph => {
  * pra baixo) acompanha quando a linha cresce (a bola com a seta entre dois
  * cards continua no meio deles, como no Studio).
  */
-const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, keepNext: boolean, centered = false): Paragraph =>
+const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, centered = false): Paragraph =>
   new Paragraph({
-    keepNext: keepNext || undefined,
     spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO },
     run: { size: 2 },
     children: [
@@ -2156,13 +2137,10 @@ const toBlocks = (items: OutIR[], body = false): (Paragraph | Table)[] => {
       out.push(toParagraph(item));
       return;
     }
-    // Duas tabelas coladas o Word funde numa só: separa com parágrafo mínimo
-    // — que segue o "manter com o próximo" da tabela de cima (título do card
-    // não fica sozinho no pé da página).
+    // Duas tabelas coladas o Word funde numa só: separa com parágrafo mínimo.
     const prev = items[i - 1];
     if (prev?.kind === 't') {
       const sep: PIR = body ? { kind: 'p', runs: [], blank: true } : spacer(0.5);
-      sep.keepNext = prev.rows[prev.rows.length - 1].cells.some((c) => allParagraphs(c.children).some((p) => p.keepNext));
       out.push(toParagraph(sep));
     }
     out.push(toTable(item));
@@ -2228,12 +2206,10 @@ const toTable = (t: TIR): Table => {
               else items = [...items, spacer(mb)];
             }
             const children = toBlocks(items);
-            // A âncora segue o "manter com o próximo" da célula (o Word olha todos os parágrafos da linha).
-            const keep = allParagraphs(cell.children).some((p) => p.keepNext);
             // Arte centralizada sem texto: a âncora é o único parágrafo (senão o
             // parágrafo vazio de baixo deslocaria o centro).
             if (artCentered && items.every((k) => k.kind === 'p' && !k.runs.length && !k.bookmark)) children.splice(0, children.length);
-            if (cell.backdrop) children.unshift(backdropParagraph(cell.backdrop, keep, artCentered));
+            if (cell.backdrop) children.unshift(backdropParagraph(cell.backdrop, artCentered));
             // Célula tem que terminar em parágrafo.
             if (!children.length || children[children.length - 1] instanceof Table) children.push(toParagraph(spacer(0.5)));
             return new TableCell({
@@ -2375,14 +2351,13 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   /**
    * Bloco de título (h1–h3 do Studio, ou selo de capítulo com número de
    * nível 1): o texto vira Título 1/2/3 do Word — navegação e sumário
-   * funcionam — e o bloco inteiro fica com o próximo.
+   * funcionam.
    */
   const markHeadings = (block: (typeof layout.blocks)[number], placed: OutIR[]) => {
     const paragraphs = allParagraphs(placed);
     const chapter = paragraphs.some((p) => p.numbering?.ref === 'clauses' && p.numbering.level === 0);
     const native = { h1: 1, h2: 2, h3: 3 }[block.type] as 1 | 2 | 3 | undefined;
     if (!chapter && !native) return;
-    for (const p of paragraphs) p.keepNext = true;
     const title = paragraphs.find((p) => !p.numbering && p.runs.some((r) => r.kind === 'text' && r.text.trim()));
     if (title) title.heading = native ?? 1;
   };
@@ -2432,7 +2407,6 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   // Onde o conteúdo anterior terminou. Atravessa a troca de seção contínua (só
   // a aba do menu mudou): o vão é o do Studio, não a distância do topo da página.
   let cursor: { page: number; y: number } | null = null;
-  let previous: OutIR[] | null = null;
   // Espaço entre tópicos em linhas em branco do corpo de texto (guia da Lex:
   // "manter o espaçamento definido no corpo"), não em px quebrados do Figma.
   // Arredonda pra baixo (só sobe com folga): arredondar 1,6 linha pra 2 em
@@ -2461,7 +2435,6 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     const marginTop = Math.max(0, Math.min(pad.top, firstTop), Math.min(firstTop, navBottom), topBand);
     if (gi > 0 && groups[gi - 1].bg !== group.bg) {
       cursor = null;
-      previous = null;
     }
     if (group.bg.startsWith('cover:')) {
       // Capa: a arte está no cabeçalho; aqui só os textos, no lugar deles.
@@ -2536,17 +2509,12 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           // bloco que não se parte (cards) cair na página seguinte e empurrar
           // o documento inteiro (efeito dominó).
           const top = Math.max(0, area.y - (pageTop(block.page) + marginTop));
-          // O fim da página anterior não fica "preso" à quebra: com "manter
-          // com o próximo" o Word levava o último card junto pra página
-          // seguinte, mesmo sobrando espaço.
-          releaseTail(body);
           trimTop(out, pageTop(block.page) + marginTop - area.y);
           placed = [{ kind: 'p', runs: [], pageBreakBefore: true, tiny: true }, ...withGap(out, top)];
         } else {
           const gap = area.y - cursor.y;
-          const lastOfPrevious = previous ? allParagraphs(previous).pop() : undefined;
           const n = blanksFor(gap);
-          const blanks: PIR[] = Array.from({ length: n }, () => ({ kind: 'p', runs: [], blank: true, keepNext: lastOfPrevious?.keepNext }));
+          const blanks: PIR[] = Array.from({ length: n }, () => ({ kind: 'p', runs: [], blank: true }));
           // Vão pequeno (linhas de um quadro, 8px): não é espaço entre tópicos — fica exato.
           placed = n ? [...blanks, ...out] : withGap(out, Math.max(0, gap));
         }
@@ -2558,23 +2526,6 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           for (const item of placed) if (item.kind === 't') fitRows(item, avail);
         }
         markHeadings(block, placed);
-        // No Studio um bloco não se parte entre páginas (vai inteiro pra
-        // próxima): "manter com o próximo" em tudo menos no fim do bloco.
-        // Parágrafo com "manter" numa linha de tabela prende a linha ao que
-        // vem depois — a última linha do bloco fica sem, senão os blocos se
-        // encadeiam.
-        if (area.h < pageH * 0.6) {
-          placed.forEach((item, i) => {
-            const last = i === placed.length - 1;
-            if (item.kind === 'p') {
-              if (!last) item.keepNext = true;
-              return;
-            }
-            item.rows.forEach((row, ri) => {
-              if (!last || ri < item.rows.length - 1) row.cells.forEach((c) => allParagraphs(c.children).forEach((p) => (p.keepNext = true)));
-            });
-          });
-        }
         const ps = allParagraphs(out);
         const target = ps.find((p) => p.heading) ?? ps.find((p) => !p.blank && !p.spacer) ?? ps[0];
         if (target) targets.set(block.blockId, target);
@@ -2586,7 +2537,6 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         }
         body.push(...placed);
         cursor = { page: (joined ?? block).page, y: bottom(area) };
-        previous = out;
       }
     }
     if (!body.length) body.push({ kind: 'p', runs: [] });
