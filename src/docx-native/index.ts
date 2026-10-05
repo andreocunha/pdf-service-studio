@@ -247,6 +247,12 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
     for (const path of Object.keys(files).filter((p) => /^word\/(header|footer)\d+\.xml$/.test(p))) {
       files[path] = strToU8(pageFields(strFromU8(files[path] as Uint8Array), pageOffsets));
     }
+    // Padrão da equipe: controle de órfãs/viúvas ligado e nada de "manter
+    // com o próximo" (ele jogava cards inteiros pra página seguinte quando o
+    // texto crescia).
+    files['word/styles.xml'] = strToU8(
+      strFromU8(files['word/styles.xml'] as Uint8Array).replace('<w:pPrDefault><w:pPr>', '<w:pPrDefault><w:pPr><w:widowControl/>'),
+    );
     // Parágrafo que carrega a quebra de seção: mínimo. Do tamanho de uma
     // linha, numa página cheia ele caía na folha seguinte — e a página nova
     // ficava com o cabeçalho da seção anterior.
