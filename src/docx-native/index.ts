@@ -247,6 +247,15 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
     for (const path of Object.keys(files).filter((p) => /^word\/(header|footer)\d+\.xml$/.test(p))) {
       files[path] = strToU8(pageFields(strFromU8(files[path] as Uint8Array), pageOffsets));
     }
+    // Parágrafo que carrega a quebra de seção: mínimo. Do tamanho de uma
+    // linha, numa página cheia ele caía na folha seguinte — e a página nova
+    // ficava com o cabeçalho da seção anterior.
+    files['word/document.xml'] = strToU8(
+      strFromU8(files['word/document.xml'] as Uint8Array).replace(
+        /<w:p><w:pPr><w:sectPr/g,
+        '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/><w:szCs w:val="2"/></w:rPr><w:sectPr',
+      ),
+    );
     for (const path of Object.keys(files).filter((p) => /^word\/(document|header\d+|footer\d+)\.xml$/.test(p))) {
       // Ordem de empilhamento pela ordem no documento: o fundo do card de fora
       // vem antes e fica embaixo do de dentro (a lib docx usa a altura da

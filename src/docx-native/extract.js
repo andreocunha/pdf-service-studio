@@ -241,7 +241,16 @@
     range.selectNodeContents(el);
     const ink = [...range.getClientRects()].filter((r) => r.width > 0);
     const inkRight = ink.length ? Math.max(...ink.map((r) => r.right + window.scrollX)) : null;
-    return { k: 'text', id: nextId++, box: tb, inkRight, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle };
+    // Texto centralizado na vertical dentro da própria caixa (rótulo flex
+    // "align-items: center" da altura da linha da tabela): no Word a célula
+    // centraliza — a caixa sozinha diz "no topo".
+    const ecs = getComputedStyle(el);
+    const centers = (/flex/.test(ecs.display) && (/column/.test(ecs.flexDirection) ? ecs.justifyContent === 'center' : ecs.alignItems === 'center'))
+      || (ecs.display === 'table-cell' && ecs.verticalAlign === 'middle');
+    const inkTop = ink.length ? Math.min(...ink.map((r) => r.top + window.scrollY)) : 0;
+    const inkBottom = ink.length ? Math.max(...ink.map((r) => r.bottom + window.scrollY)) : 0;
+    const middle = centers && ink.length && inkTop - tb.y > 3 && Math.abs((inkTop - tb.y) - (tb.y + tb.h - inkBottom)) < 3 ? true : undefined;
+    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle };
   };
 
   const hasBlockChildren = (el) =>

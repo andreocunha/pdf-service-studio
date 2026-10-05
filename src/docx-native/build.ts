@@ -110,6 +110,8 @@ type CellIR = {
   vAlign?: 'top' | 'center' | 'bottom';
   /** Mesclagem vertical: começa aqui / continua a de cima. */
   vmerge?: 'restart' | 'continue';
+  /** Largura que o desenho da célula pede (a bola entre dois cards): tirada dos vizinhos. */
+  want?: number;
   children: OutIR[];
 };
 type TIRRow = { height?: number; cells: CellIR[]; exact?: boolean };
@@ -1347,6 +1349,12 @@ const renderBand = async (band: LayoutNode[], region: Box, ctx: Ctx): Promise<Ou
 };
 
 /** Colunas lado a lado → uma tabela de uma linha, largura exata de cada célula. */
+/** Só texto, centralizado na vertical dentro da própria caixa (rótulo flex). */
+const centered = (nodes: LayoutNode[]): boolean => {
+  const ls = leaves(nodes);
+  return ls.length > 0 && ls.every((l) => l.k === 'text' && l.middle);
+};
+
 const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overlays: LayoutNode[]): Promise<TIR> => {
   const boxes = cols.map(union);
   const left = boxes[0].x;
@@ -1386,15 +1394,32 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
         ...(await paintOf(only as Decorated, pad, ctx)),
         margins: [pad[0], pad[1], pad[2], pad[3]],
         // Centro só se o conteúdo estava centralizado na caixa (folga igual).
-        vAlign: top > 1.5 && Math.abs(top - low) < 2 ? 'center' : 'top',
+        vAlign: centered(only.kids) || (top > 1.5 && Math.abs(top - low) < 2) ? 'center' : 'top',
         children: children.length ? children : [{ kind: 'p', runs: [] }],
       });
       if (gapRight >= 1) cells.push({ width: gapRight, children: [{ kind: 'p', runs: [] }], gap: true });
       continue;
     }
+    // Desenho mais largo que a coluna (a bola da seta, que no Studio invade
+    // os dois cards): uma imagem só, no tamanho dele — a coluna cresce
+    // tirando dos vizinhos. Recortada, a bola sumia e a seta saía espremida.
+    const art = only && !hasText(only) && leaves(col).length ? union(leaves(col)) : null;
+    if (only && art && art.w > width + 1) {
+      const image = await ctx.assets.backdrop(only.id, art);
+      if (image) {
+        const vAlign = alignOf(art);
+        cells.push({
+          width,
+          want: art.w,
+          vAlign,
+          children: [{ kind: 'p', runs: [{ kind: 'img', image, w: art.w, h: art.h }], align: 'center', spaceBefore: vAlign === 'center' ? undefined : art.y - rowTop, line: { value: tw(art.h), rule: 'atLeast' }, tiny: true }],
+        });
+        continue;
+      }
+    }
     // Coluna só com desenho (a bola da seta entre dois cards): alinha pelo
     // desenho, não pela caixa que o embrulha (que tem a altura toda).
-    const vAlign = alignOf(col.length === 1 && !hasText(col[0]) && leaves(col).length ? union(leaves(col)) : colBox);
+    const vAlign = centered(col) ? 'center' : alignOf(col.length === 1 && !hasText(col[0]) && leaves(col).length ? union(leaves(col)) : colBox);
     // Célula na largura da coluna; o vão até a próxima vira célula vazia
     // (é onde enfeites como a seta entre dois cards voltam).
     // Texto de uma linha (número do sumário, título curto) ocupa a largura
@@ -1407,6 +1432,16 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
     fit(children, own);
     cells.push({ width: own, vAlign, children: children.length ? children : [{ kind: 'p', runs: [] }] });
     if (width - own >= 1) cells.push({ width: width - own, children: [{ kind: 'p', runs: [] }], gap: true });
+  }
+  for (const [i, c] of cells.entries()) {
+    if (!c.want || c.want <= c.width) continue;
+    for (const n of [cells[i - 1], cells[i + 1]]) {
+      if (!n) continue;
+      const take = Math.min((c.want - c.width) / (n === cells[i + 1] ? 1 : 2), n.width - 20);
+      if (take <= 0) continue;
+      n.width -= take;
+      c.width += take;
+    }
   }
   // Enfeites tirados do corte: a imagem (ou a que está dentro deles) volta no
   // espaço vazio onde cai o centro dela.
@@ -2630,6 +2665,14 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         ],
       }),
     );
+    // Fundo novo começa em página nova: quebra de seção contínua + quebra de
+    // página (guia da Lex — seção "próxima página" deixa espaços em branco
+    // impossíveis de mexer quando o texto muda).
+    if (gi > 0 && groups[gi - 1].bg !== group.bg) {
+      const first = body[0];
+      if (first?.kind === 'p') first.pageBreakBefore = true;
+      else body.unshift({ kind: 'p', runs: [], pageBreakBefore: true, tiny: true });
+    }
     sectionsIR.push({ gi, body, nav: navIR, headerBg, overflowBg, headerLogos, foot, marginTop, headerDistance });
   }
 
@@ -2668,7 +2711,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     }
     return {
       properties: {
-        type: sec.gi === 0 || groups[sec.gi - 1].bg !== groups[sec.gi].bg ? SectionType.NEXT_PAGE : SectionType.CONTINUOUS,
+        type: SectionType.CONTINUOUS,
         ...(overflowChildren ? { titlePage: true } : {}),
         page: {
           size: { width: tw(pageW), height: tw(pageH) },
