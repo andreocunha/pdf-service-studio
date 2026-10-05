@@ -58,6 +58,8 @@ export type LayoutNode =
       paras: Para[];
       /** Onde as linhas terminam de verdade (px, página). */
       inkRight?: number | null;
+      /** Texto centralizado na vertical dentro da própria caixa. */
+      middle?: boolean;
       autonumber: string | null;
       autonumberStyle?: (Omit<Run, 't' | 'br' | 'link'> & { lineHeight: number | null }) | null;
     } & Deco)
