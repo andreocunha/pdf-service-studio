@@ -1105,7 +1105,10 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
   const lh = node.paras[0]?.lineHeight ?? node.paras[0]?.fontSize * 1.2;
   const wrapped = !isOneLine(node);
   void lh;
-  const indentRight = wrapped ? Math.max(0, right(region) - right(node.box) - 2) : 0;
+  // Uma linha que no Studio passa da área (título da capa até 60px da borda,
+  // margem de 67px): avança um pouco na margem em vez de quebrar.
+  const over = (node.inkRight ?? right(node.box)) + 8 - right(region);
+  const indentRight = wrapped ? Math.max(0, right(region) - right(node.box) - 2) : over > 0 ? -Math.min(over, 24) : 0;
   // Uma linha centralizada/à direita: o centro (ou a borda direita) fica onde
   // estava, com folga dos dois lados pra não quebrar se o Word desenhar maior.
   const slack = node.box.w * 0.15 + 4;
@@ -1200,6 +1203,37 @@ const withGap = (out: OutIR[], gap: number): OutIR[] => {
     return out;
   }
   return [spacer(gap), ...out];
+};
+
+/**
+ * Tira `px` do vazio no alto do conteúdo (espaço antes, margem/altura da
+ * primeira linha da tabela): bloco que começa atrás do cabeçalho do Word.
+ */
+const trimTop = (out: OutIR[], px: number) => {
+  const first = out[0];
+  if (!first || px <= 0) return;
+  if (first.kind === 'p') {
+    if (first.spacer !== undefined && !first.runs.length && out.length > 1) {
+      const cut = Math.min(px, first.spacer);
+      first.spacer -= cut;
+      first.line = { value: Math.max(MIN_LINE, tw(first.spacer)), rule: 'exact' };
+      trimTop(out.slice(1), px - cut);
+      return;
+    }
+    first.spaceBefore = Math.max(0, (first.spaceBefore ?? 0) - px);
+    return;
+  }
+  const row = first.rows[0];
+  if (row.height) row.height = Math.max(1, row.height - px);
+  for (const c of row.cells) {
+    let rest = px;
+    if (c.margins && c.margins[0] > 0) {
+      const cut = Math.min(rest, c.margins[0]);
+      c.margins = [c.margins[0] - cut, c.margins[1], c.margins[2], c.margins[3]];
+      rest -= cut;
+    }
+    trimTop(c.children, rest);
+  }
 };
 
 const renderRegion = async (nodes: LayoutNode[], region: Box, ctx: Ctx): Promise<OutIR[]> => {
@@ -2016,7 +2050,7 @@ const toParagraph = (p: PIR): Paragraph => {
       p.align === 'center' ? AlignmentType.CENTER : p.align === 'right' ? AlignmentType.RIGHT : p.align === 'both' ? AlignmentType.JUSTIFIED : AlignmentType.LEFT,
     indent:
       p.indentLeft || p.indentRight || p.hanging !== undefined
-        ? { left: Math.round((p.indentLeft ?? 0) * 15), right: tw(p.indentRight ?? 0), ...(p.hanging !== undefined ? { hanging: tw(p.hanging) } : {}) }
+        ? { left: Math.round((p.indentLeft ?? 0) * 15), right: Math.round((p.indentRight ?? 0) * 15), ...(p.hanging !== undefined ? { hanging: tw(p.hanging) } : {}) }
         : undefined,
     spacing: {
       before: tw(p.spaceBefore ?? 0),
@@ -2200,7 +2234,14 @@ export const PAGE_FIELD = '§LEXPAGE§';
  * Rodapé do Studio (texto + "02/28") → rodapé do Word: tabela sem borda com
  * o texto e a numeração como campo (atualiza sozinha quando o conteúdo cresce).
  */
-const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: number; right: number }, ctx: Ctx) => {
+type BuiltFooter = {
+  footer: Footer;
+  distance: number;
+  offsets: { current: number; total: number } | null;
+  atTop?: { blocks: () => (Paragraph | Table)[]; top: number };
+};
+
+const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: number; right: number }, ctx: Ctx): BuiltFooter => {
   const page = layout.pages[pageIndex];
   const footer = page?.footer;
   // Sem rodapé: parágrafo mínimo — um vazio no estilo Normal ocupava uma linha no pé da capa.
@@ -2230,6 +2271,13 @@ const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: num
     ] }],
   };
   const lowest = Math.max(bottom(num.box), footer.text ? bottom(footer.text.box) : 0);
+  // "Rodapé" no alto da página (faixa com título e "02/12" em cima): vai pro
+  // cabeçalho do Word. No rodapé, a distância da borda de baixo comia a
+  // página inteira e sobrava uma linha de corpo por folha.
+  if (lowest < page.box.y + page.box.h / 2) {
+    const top = Math.min(num.box.y, footer.text ? footer.text.box.y : num.box.y) - page.box.y;
+    return { ...buildFooter(layout, -1, pad, ctx), offsets, atTop: { blocks: () => [...toBlocks([table]), toParagraph(spacer(0.5))], top } };
+  }
   return {
     footer: new Footer({ children: [...toBlocks([table]), toParagraph(spacer(0.5))] }),
     distance: Math.max(0, page.box.y + page.box.h - lowest),
@@ -2369,7 +2417,13 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     // corpo pra baixo do cabeçalho E ainda soma o vão até o primeiro bloco).
     const nav = group.bg.startsWith('cover:') ? null : layout.pages[group.pages[0]]?.nav;
     const navBottom = nav ? bottom(nav.tree.box) - pageTop(group.pages[0]) : 0;
-    const marginTop = Math.max(0, Math.min(pad.top, firstTop), Math.min(firstTop, navBottom));
+    // Faixa de título/número no alto (rodapé do Studio posto em cima): fica
+    // no cabeçalho do Word, e o corpo começa abaixo dela — o que o bloco
+    // tinha atrás da faixa sai do topo dele (trimTop).
+    const band = group.bg.startsWith('cover:') ? null : layout.pages[group.pages[0]]?.footer;
+    const bandBottom = band?.number && Math.max(bottom(band.number.box), band.text ? bottom(band.text.box) : 0) - pageTop(group.pages[0]);
+    const topBand = bandBottom && bandBottom < pageH / 2 ? bandBottom + 8 : 0;
+    const marginTop = Math.max(0, Math.min(pad.top, firstTop), Math.min(firstTop, navBottom), topBand);
     if (gi > 0 && groups[gi - 1].bg !== group.bg) {
       cursor = null;
       previous = null;
@@ -2439,6 +2493,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         let placed: OutIR[];
         if (!cursor) {
           // Primeiro bloco da página: a distância do topo continua exata.
+          trimTop(out, pageTop(block.page) + marginTop - area.y);
           placed = withGap(out, Math.max(0, area.y - (pageTop(block.page) + marginTop)));
         } else if (cursor.page !== block.page) {
           // Mudou de página no Studio: quebra de página no Word também, com o
@@ -2450,6 +2505,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           // com o próximo" o Word levava o último card junto pra página
           // seguinte, mesmo sobrando espaço.
           releaseTail(body);
+          trimTop(out, pageTop(block.page) + marginTop - area.y);
           placed = [{ kind: 'p', runs: [], pageBreakBefore: true, tiny: true }, ...withGap(out, top)];
         } else {
           const gap = area.y - cursor.y;
@@ -2595,6 +2651,11 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   const sections: ISectionOptions[] = sectionsIR.map((sec) => {
     const headerChildren: (Paragraph | Table)[] = [sec.headerBg, ...sec.headerLogos];
     const overflowChildren: (Paragraph | Table)[] | null = sec.overflowBg ? [sec.overflowBg] : null;
+    const atTop = sec.foot.atTop;
+    if (atTop) {
+      headerChildren.push(...atTop.blocks());
+      overflowChildren?.push(...atTop.blocks());
+    }
     if (sec.nav.length) {
       const navBlocks = toBlocks(sec.nav);
       headerChildren.push(...navBlocks);
@@ -2620,7 +2681,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
             // O Word nunca deixa o corpo invadir o rodapé.
             bottom: tw(Math.min(Math.max(0, pad.bottom - 20), coverBottom.get(sec.gi) ?? pad.bottom)),
             left: tw(pad.left),
-            header: tw(sec.headerDistance),
+            header: tw(atTop ? (sec.nav.length ? Math.min(atTop.top, sec.headerDistance) : atTop.top) : sec.headerDistance),
             footer: tw(sec.foot.distance),
           },
         },
