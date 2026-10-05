@@ -244,7 +244,7 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
     const { doc, used, pageOffsets } = await buildDocument({ layout, fonts, assets, background, coverPages: covers });
     const packed = await Packer.toBuffer(doc);
     const files = unzipSync(new Uint8Array(packed)) as Zippable;
-    for (const path of Object.keys(files).filter((p) => /^word\/footer\d+\.xml$/.test(p))) {
+    for (const path of Object.keys(files).filter((p) => /^word\/(header|footer)\d+\.xml$/.test(p))) {
       files[path] = strToU8(pageFields(strFromU8(files[path] as Uint8Array), pageOffsets));
     }
     for (const path of Object.keys(files).filter((p) => /^word\/(document|header\d+|footer\d+)\.xml$/.test(p))) {
