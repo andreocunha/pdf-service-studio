@@ -38,26 +38,51 @@
     return [m[1], m[2], m[3]].map((v) => Number(v).toString(16).padStart(2, '0')).join('');
   };
 
-  const border = (cs, side) => {
+  const border = (el, cs, side) => {
     const w = parseFloat(cs[`border${side}Width`]) || 0;
     const style = cs[`border${side}Style`];
     if (!w || style === 'none' || style === 'hidden') return null;
-    const c = color(cs[`border${side}Color`]);
+    const c = blend(el, cs[`border${side}Color`], true);
     return c ? { w, color: c } : null;
   };
 
   /**
-   * Cor de fundo como aparece: transparência (rgba ou opacity do elemento e
-   * dos pais) misturada com branco — célula do Word não tem transparência.
+   * O que está atrás do elemento: a primeira cor de fundo opaca dos pais, ou
+   * null quando antes dela vem uma imagem/gradiente (cor desconhecida).
    */
-  const solidFill = (el, cs) => {
-    const m = cs.backgroundColor.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/);
+  const behind = (el) => {
+    for (let e = el.parentElement; e && e !== document.body; e = e.parentElement) {
+      const cs = getComputedStyle(e);
+      if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
+      const m = cs.backgroundColor.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/);
+      if (m && (m[4] === undefined || Number(m[4]) >= 0.95)) return [m[1], m[2], m[3]].map(Number);
+    }
+    return [255, 255, 255];
+  };
+
+  /**
+   * Cor como aparece: transparência (rgba ou opacity do elemento e dos pais)
+   * misturada com o que está atrás — célula do Word não tem transparência.
+   * Sobre imagem (cor de trás desconhecida) mistura com branco, menos o
+   * vidro claro da capa: sem preenchimento (branco chapado escondia o texto
+   * claro), e a borda dele fica na cor cheia — é o contorno do quadro.
+   */
+  const blend = (el, c, line = false) => {
+    const m = c && c.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/);
     if (!m) return null;
     let alpha = m[4] === undefined ? 1 : Number(m[4]);
     for (let e = el; e && e !== document.body; e = e.parentElement) alpha *= Number(getComputedStyle(e).opacity);
     if (alpha < 0.05) return null;
-    return [m[1], m[2], m[3]].map((v) => Math.round(255 - (255 - Number(v)) * alpha).toString(16).padStart(2, '0')).join('');
+    const rgb = [m[1], m[2], m[3]].map(Number);
+    const hex = (c) => c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+    const mix = (back) => back.map((b, i) => b + (rgb[i] - b) * alpha);
+    const back = alpha >= 0.95 ? [255, 255, 255] : behind(el);
+    if (back) return hex(mix(back));
+    // Atrás é imagem: vidro claro (branco translúcido) sairia branco chapado.
+    if (alpha < 0.5 && rgb.every((v) => v > 235)) return line ? hex(rgb) : null;
+    return hex(mix([255, 255, 255]));
   };
+  const solidFill = (el, cs) => blend(el, cs.backgroundColor);
 
   const decoration = (el, cs) => {
     const d = {};
@@ -82,7 +107,7 @@
     }
     const b = {};
     for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
-      const v = border(cs, side);
+      const v = border(el, cs, side);
       if (v) b[side.toLowerCase()] = v;
     }
     if (Object.keys(b).length) d.border = b;
@@ -187,7 +212,11 @@
         current = null;
         return;
       }
-      const block = !INLINE.has(cs.display);
+      // Filho de linha flex fica na mesma linha (o "º" de "Contrato nº" num
+      // <span> dentro de um flex): só abre parágrafo se o pai empilha.
+      const pcs = node.parentElement ? getComputedStyle(node.parentElement) : null;
+      const inFlexRow = pcs && /flex/.test(pcs.display) && !/column/.test(pcs.flexDirection) && pcs.flexWrap === 'nowrap';
+      const block = !INLINE.has(cs.display) && !inFlexRow;
       if (block) {
         current = null;
         if (node.tagName === 'LI' || cs.display === 'list-item') {
