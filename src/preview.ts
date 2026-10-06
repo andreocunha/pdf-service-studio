@@ -19,6 +19,10 @@ export type PageAudit = {
   emptyBottomPx: number;
   /** Conteúdo passou da margem inferior. */
   overflow: boolean;
+  /** Onde o conteúdo termina, medido do topo da página (px). Bloco
+   *  `fullWidth` no fim da página pode ir até a borda (passa da margem) sem
+   *  estar estourado — quem chama compara isto com a altura da página. */
+  contentBottomPx: number;
 };
 
 export type PreviewResult = {
@@ -59,6 +63,7 @@ export const renderDocumentPreview = async (args: {
           lastBlock: last ? { id: last.dataset.blockId ?? '', type: last.dataset.blockType ?? '' } : null,
           emptyBottomPx: blocks.length ? Math.max(0, Math.round(limit - bottom)) : Math.round(box.height),
           overflow: bottom > limit + 1,
+          contentBottomPx: Math.round(bottom - box.top),
         };
       });
     }, meta.paddingBottomPx ?? 0);
