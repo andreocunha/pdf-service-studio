@@ -53,10 +53,13 @@ export const renderDocumentPreview = async (args: {
         const box = root.getBoundingClientRect();
         const blocks = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]'))
           .filter((el) => !el.parentElement?.closest('[data-block-id]'));
-        const limit = box.top + box.height - paddingBottom;
+        const last = blocks.at(-1);
+        // Bloco fullWidth no pé da página sangra a margem de baixo de propósito
+        // (margin-bottom negativo): a capa de página inteira não "estourou".
+        const bleed = last ? Math.max(0, -parseFloat(getComputedStyle(last).marginBottom || '0')) : 0;
+        const limit = box.top + box.height - Math.max(0, paddingBottom - bleed);
         let bottom = box.top;
         for (const el of blocks) bottom = Math.max(bottom, el.getBoundingClientRect().bottom);
-        const last = blocks.at(-1);
         return {
           index,
           blockIds: blocks.map((el) => el.dataset.blockId ?? ''),
