@@ -43,9 +43,10 @@ import {
   type ParagraphChild,
 } from 'docx';
 
-import type { Face } from '../docx-fonts.js';
-import type { FontResolver } from './fonts.js';
-import type { Box, DocumentLayout, FooterNumberFormat, LayoutNode, Para, Run } from './layout.js';
+import type { Assets, ImageData } from '../office/assets.js';
+import { fitLetterSpacing, type Face, type FontResolver } from '../office/fonts.js';
+import { isOneLine, type Box, type DocumentLayout, type LayoutNode, type Para, type Run } from '../office/layout.js';
+import { pageNumbering, type PageOffsets } from '../office/pages.js';
 
 // ---------------------------------------------------------------------------
 // Unidades
@@ -62,7 +63,6 @@ const emu = (px: number) => Math.round(px * 9525);
 // Representação intermediária (mutável; vira docx no fim)
 // ---------------------------------------------------------------------------
 
-type ImageData = { data: Buffer; type: 'png' | 'jpg' | 'gif' | 'bmp'; svg?: Buffer; aspect?: number };
 type RunIR =
   | { kind: 'text'; text: string; run: Run; face: Face | null; spacing?: number }
   | { kind: 'br' }
@@ -120,15 +120,6 @@ type OutIR = PIR | TIR;
 // ---------------------------------------------------------------------------
 // Contexto
 // ---------------------------------------------------------------------------
-
-export type Assets = {
-  image: (src: string, w: number, h: number) => Promise<ImageData | null>;
-  raster: (id: number, box: Box) => Promise<ImageData | null>;
-  /** Só a pintura da caixa (fundo, gradiente, borda, sombra, cantos), sem o conteúdo. */
-  paint: (id: number) => Promise<ImageData | null>;
-  /** Tudo do elemento menos o texto (bloco complexo). */
-  backdrop: (id: number, clip: Box) => Promise<ImageData | null>;
-};
 
 type Ctx = {
   /** Quantos caracteres saíram em cada face/tamanho — a mais usada vira o estilo Normal. */
@@ -682,18 +673,6 @@ const fitRows = (t: TIR, avail: number) => {
   }
 };
 
-/**
- * Texto de uma linha só no Studio: pelas linhas medidas de cada trecho (a
- * caixa pode ser mais alta que o texto — rótulo centralizado numa linha de
- * 41px); sem medida, pela altura.
- */
-const isOneLine = (n: Extract<LayoutNode, { k: 'text' }>): boolean => {
-  if (n.paras.length !== 1) return false;
-  if (n.paras[0].runs.some((r) => r.br)) return false;
-  const runs = n.paras[0].runs.filter((r) => r.t);
-  if (runs.length && runs.every((r) => r.lines !== undefined)) return runs.every((r) => (r.lines ?? 1) <= 1);
-  return n.box.h < (n.paras[0].lineHeight ?? n.paras[0].fontSize * 1.2) * 1.5;
-};
 
 const leaves = (nodes: LayoutNode[]): LayoutNode[] =>
   nodes.flatMap((n) => (n.k === 'box' && !decorated(n) && !n.bgImage ? leaves(n.kids) : [n]));
@@ -950,37 +929,9 @@ const lineOf = (para: Para, face: Face | null): PIR['line'] => {
  * letter-spacing do CSS. twips por caractere; undefined sem métrica.
  */
 const spacingOf = (r: Run, face: Face | null, ctx: Ctx, justified = false): number | undefined => {
-  const css = r.letterSpacing ? Math.round(r.letterSpacing * 15) : undefined;
-  if (!face || !r.t) return css;
-  const metric = ctx.fonts.data.metrics.get(face);
-  if (!metric) return css;
-  const text = r.caps ? r.t.toUpperCase() : r.t;
-  // Tamanho que o Word desenha: ele só aceita meio ponto (13px = 9,75pt vira
-  // 10pt, 2,5% mais largo) — a diferença entra no espaçamento.
-  const wordSize = halfPt(r.size) / 1.5;
-  let studio = 0;
-  let word = 0;
-  let count = 0;
-  for (const ch of text) {
-    const adv = metric[ch.codePointAt(0)!];
-    if (adv === undefined) return css;
-    studio += adv * r.size;
-    word += adv * wordSize;
-    count++;
-  }
-  if (!count || !text.trim()) return undefined;
-  // Largura de referência: a medida no Studio (pega arredondamento e kerning
-  // do Chromium), somando o espaço onde a linha quebrou — ele não entra na
-  // medida. Justificado com quebra estica os espaços: aí vale a largura
-  // natural + letter-spacing.
-  const space = (metric[32] ?? 0.25) * r.size;
-  const lines = r.lines ?? 1;
-  const target =
-    r.width && !(justified && lines > 1) ? r.width + (lines - 1) * space : studio + (r.letterSpacing ?? 0) * count;
-  const perChar = (target - word) / count;
-  // Diferença grande demais não é arredondamento — é outra coisa.
-  if (Math.abs(perChar) > r.size * 0.25) return css;
-  return Math.round(perChar * 15);
+  // O Word só aceita meio ponto (13px = 9,75pt vira 10pt, 2,5% mais largo): a diferença entra no espaçamento.
+  const px = fitLetterSpacing(r, face, ctx.fonts.data, halfPt(r.size) / 1.5, justified);
+  return px === undefined ? undefined : Math.round(px * 15);
 };
 
 // ---------------------------------------------------------------------------
@@ -1988,7 +1939,9 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
   // com a altura do conteúdo.
   const shot = { ...area, h: Math.max(area.h, Math.ceil(bottom(u)) - y) };
   const image = await ctx.assets.backdrop(tree.id, shot);
-  if (!image) return renderRegion([tree], region, ctx);
+  // Sem a captura: só o texto (o bloco inteiro voltaria pra cá — laço sem fim
+  // até estourar a memória).
+  if (!image) return texts.length ? renderRegion(texts, region, ctx) : [];
   // Sem texto por cima e cabendo na largura (ícones e barra da linha do
   // tempo): imagem na linha do texto, não flutuante — anda com o conteúdo.
   if (!texts.length && shot.x >= region.x - 8 && right(shot) <= right(region) + 8) {
@@ -2274,7 +2227,6 @@ const CLAUSE_FORMATS: Record<string, (typeof LevelFormat)[keyof typeof LevelForm
   a: LevelFormat.LOWER_LETTER, A: LevelFormat.UPPER_LETTER,
   i: LevelFormat.LOWER_ROMAN, I: LevelFormat.UPPER_ROMAN,
 };
-export type PageOffsets = { current: number; total: number; format: FooterNumberFormat };
 
 /**
  * Rodapé do Studio (texto + "02/28") → rodapé do Word: tabela sem borda com
@@ -2293,9 +2245,7 @@ const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: num
   // Sem rodapé: parágrafo mínimo — um vazio no estilo Normal ocupava uma linha no pé da capa.
   if (!footer?.number) return { footer: new Footer({ children: [new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] })] }), distance: 0, offsets: null };
   const num = footer.number;
-  // "01/12", "1" ou "Página 1 de 12": o 1º número é a página, o 2º o total.
-  const [current = pageIndex + 1, total = layout.pages.length] = (num.text.match(/\d+/g) ?? []).map(Number);
-  const offsets: PageOffsets = { current: current - (pageIndex + 1), total: total - layout.pages.length, format: num.format ?? 'page-total' };
+  const offsets = pageNumbering(layout, pageIndex);
   const numFace = ctx.fonts.resolve(num.style.font, num.style.weight, num.style.italic);
   if (numFace) ctx.used.add(numFace);
   // Número com folga (o Word desenha "06/09" um pouco mais largo e quebrava).

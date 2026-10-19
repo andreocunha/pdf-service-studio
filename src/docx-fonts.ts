@@ -25,93 +25,12 @@
  * manifest fica como o iLovePDF deixou.
  */
 import { randomUUID } from 'node:crypto';
-import { brotliDecompressSync } from 'node:zlib';
 
 import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from 'fflate';
 
-export type Face = {
-  family: string;
-  bold: boolean;
-  italic: boolean;
-  lineHeight: number;
-  file?: string;
-  /** Peso e estilo do desenho (a família do Word já não diz: "CAIXA Std Bold" não é negrito). */
-  weight?: number;
-  style?: 'italic' | 'normal';
-  /** Arquivo de public/fonts de onde a face saiu ("caixa-std/CAIXA_Std-Bold.woff2"). */
-  source?: string;
-  /** Instância de fonte variável: arquivo de origem e FontBBox (milésimos de em). */
-  variable?: string;
-  bbox?: number[];
-};
+import { embeddableFamilies, fontSlot, loadFontFile, loadFonts, untilAborted, type Face, type FontData } from './office/fonts.js';
 
-export type FontData = {
-  baseUrl: string;
-  faces: Record<string, Face>;
-  metrics: Map<Face, Record<string, number>>;
-  instances: Map<string, Face[]>;
-};
-
-/** O manifest muda a cada deploy do app com fonte nova; relê de tempos em tempos. */
-const MANIFEST_TTL_MS = 5 * 60_000;
-const FETCH_TIMEOUT_MS = 8_000;
-
-const fetchBytes = async (url: string): Promise<Buffer> => {
-  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`word-fonts: ${res.status} em ${url}`);
-  return Buffer.from(await res.arrayBuffer());
-};
-
-/**
- * Os arquivos são brotli (.br). Se algum CDN no caminho servir com
- * Content-Encoding: br, o fetch já entrega descomprimido — aceita os dois.
- */
-const unbrotli = (buf: Buffer): Buffer => {
-  try {
-    return brotliDecompressSync(buf);
-  } catch {
-    return buf;
-  }
-};
-
-let fontData: { data: FontData; at: number } | null = null;
-export const loadFonts = async (baseUrl: string): Promise<FontData> => {
-  if (fontData && fontData.data.baseUrl === baseUrl && Date.now() - fontData.at < MANIFEST_TTL_MS) return fontData.data;
-  try {
-    const [manifest, metricsBr] = await Promise.all([
-      fetchBytes(new URL('manifest.json', baseUrl).href),
-      fetchBytes(new URL('metrics.json.br', baseUrl).href),
-    ]);
-    const faces = JSON.parse(manifest.toString('utf8')) as Record<string, Face>;
-    const raw = JSON.parse(unbrotli(metricsBr).toString('utf8')) as Record<string, Record<string, number>>;
-    const metrics = new Map<Face, Record<string, number>>();
-    const instances = new Map<string, Face[]>();
-    for (const [ps, face] of Object.entries(faces)) {
-      if (raw[ps]) metrics.set(face, raw[ps]);
-      if (face.variable) instances.set(face.variable, [...(instances.get(face.variable) ?? []), face]);
-    }
-    fontData = { data: { baseUrl, faces, metrics, instances }, at: Date.now() };
-  } catch (err) {
-    // App fora do ar por um instante: a última versão lida serve.
-    if (fontData?.data.baseUrl !== baseUrl) throw err;
-  }
-  return fontData!.data;
-};
-
-/** Arquivos de fonte têm hash no nome — nunca mudam, podem ficar em memória. */
-const fontFiles = new Map<string, Promise<Buffer>>();
-/** ~100–300 KB por face: 60 cobrem os documentos do dia (≈15 MB no máximo). */
-const MAX_CACHED_FONTS = 60;
-const loadFontFile = (url: string): Promise<Buffer> => {
-  let file = fontFiles.get(url);
-  if (!file) {
-    if (fontFiles.size >= MAX_CACHED_FONTS) fontFiles.clear();
-    file = fetchBytes(url).then(unbrotli);
-    file.catch(() => fontFiles.delete(url));
-    fontFiles.set(url, file);
-  }
-  return file;
-};
+export type { Face, FontData };
 
 /**
  * Face do manifest pra uma fonte do PDF. Fonte variável o Chromium grava com o
@@ -838,9 +757,8 @@ const lineEdit = (xml: string, para: Paragraph, style: StyleInfo, ratio: number)
 // Embutir as fontes
 // ---------------------------------------------------------------------------
 
-const SLOT = (f: Face): string =>
-  f.bold && f.italic ? 'embedBoldItalic' : f.bold ? 'embedBold' : f.italic ? 'embedItalic' : 'embedRegular';
-const SLOT_ORDER = ['embedRegular', 'embedBold', 'embedItalic', 'embedBoldItalic'];
+/** embedRegular, embedBold, embedItalic, embedBoldItalic. */
+const SLOT = (f: Face): string => `embed${fontSlot(f)[0].toUpperCase()}${fontSlot(f).slice(1)}`;
 
 /** ECMA-376 §17.8.1: XOR dos 32 primeiros bytes com a chave GUID invertida. */
 const obfuscate = (ttf: Buffer, guid: string): Uint8Array => {
@@ -851,19 +769,13 @@ const obfuscate = (ttf: Buffer, guid: string): Uint8Array => {
   return out;
 };
 
-export const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string): Promise<void> => {
-  const byFamily = new Map<string, Face[]>();
-  for (const face of used) {
-    if (!face.file) continue;
-    const list = byFamily.get(face.family) ?? [];
-    if (!list.some((f) => SLOT(f) === SLOT(face))) list.push(face);
-    byFamily.set(face.family, list);
-  }
+export const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string, signal?: AbortSignal): Promise<void> => {
+  const byFamily = embeddableFamilies(used);
   if (byFamily.size === 0) return;
   const ttfs = new Map<Face, Buffer>();
   await Promise.all(
     [...byFamily.values()].flat().map(async (face) => {
-      ttfs.set(face, await loadFontFile(new URL(face.file!, baseUrl).href));
+      ttfs.set(face, await untilAborted(loadFontFile(new URL(face.file!, baseUrl).href), signal));
     }),
   );
 
@@ -874,7 +786,6 @@ export const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: stri
   let n = 0;
   for (const [family, faces] of byFamily) {
     const embeds = faces
-      .sort((a, b) => SLOT_ORDER.indexOf(SLOT(a)) - SLOT_ORDER.indexOf(SLOT(b)))
       .map((face) => {
         n++;
         const guid = `{${randomUUID().toUpperCase()}}`;

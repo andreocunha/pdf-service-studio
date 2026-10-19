@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 export async function load(url, context, nextLoad) {
   const stubs = {
     'auth.js': 'export const authorize = async () => ({documentId:"download-test", workspaceId:"test"});',
-    'browser.js': 'export const closeBrowser = async () => {}; export const warmUpBrowser = async () => {}; export const getBrowser = async () => {throw Error("unexpected browser")};',
+    'browser.js': 'export const closeBrowser = async () => {}; export const warmUpBrowser = async () => {}; export const getBrowser = async () => {throw Error("unexpected browser")}; export const closeNow = async () => {};',
     'render.js': `import {readFileSync} from 'node:fs'; export const renderDocumentPdf = async () => ({buffer:readFileSync(process.env.PDF_TEST_FIXTURE), title:'Menu test', fonts:[]}); export const withRenderPage = async () => {throw Error("unexpected render page")};`,
     'ilovepdf.js': 'export const startIlovepdfTask = async () => ({}); export const compressPdf = async (pdf) => pdf; export const convertPdfToOffice = async () => {throw Error("unexpected Office export")};',
     'supabase.js': 'export const serviceClient = () => {throw Error("unexpected database access")};',
