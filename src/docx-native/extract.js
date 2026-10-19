@@ -163,7 +163,7 @@
     let autonumberFormat = null;
     let autonumberText = null;
     // Só os números que aparecem (um escondido não conta).
-    const multiNumber = [...el.querySelectorAll('[data-autonumber]')].filter((m) => (m.checkVisibility ? m.checkVisibility() : true)).length > 1;
+    const multiNumber = [...el.querySelectorAll('[data-autonumber]')].filter((m) => !m.closest('[data-editor-only]') && (m.checkVisibility ? m.checkVisibility({ visibilityProperty: true, opacityProperty: true }) : true)).length > 1;
     const open = (source, list) => {
       current = { ...paraStyle(source), runs: [], list };
       // Item de lista: onde o texto do item começa, e o vão do marcador
