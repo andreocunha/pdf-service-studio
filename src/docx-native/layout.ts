@@ -65,6 +65,10 @@ export type LayoutNode =
       middle?: boolean;
       autonumber: string | null;
       autonumberStyle?: (Omit<Run, 't' | 'br' | 'link'> & { lineHeight: number | null }) | null;
+      /** Estilo do número no Studio (`a`, `A`, `i`, `I`, `1`); null = caminho 1.2.3. */
+      autonumberFormat?: string | null;
+      /** O número como aparece ("c", "IV"). */
+      autonumberText?: string | null;
     } & Deco)
   | { k: 'img'; id: number; box: Box; src: string; abs?: boolean }
   | { k: 'raster'; id: number; box: Box; abs?: boolean }

@@ -160,6 +160,8 @@
     let current = null;
     let autonumber = null;
     let autonumberStyle = null;
+    let autonumberFormat = null;
+    let autonumberText = null;
     const open = (source, list) => {
       current = { ...paraStyle(source), runs: [], list };
       // Item de lista: onde o texto do item começa, e o vão do marcador
@@ -193,7 +195,10 @@
       if (!visible(node, cs)) return;
       if (node.matches('a[data-zone-link]')) return; // sobreposição de clique, sem texto
       if (node.hasAttribute('data-autonumber')) {
-        autonumber = node.textContent.trim();
+        // Com estilo ("c", "IV"), o caminho real vem no atributo; o texto é o que aparece.
+        autonumber = node.getAttribute('data-autonumber-path') || node.textContent.trim();
+        autonumberFormat = node.getAttribute('data-autonumber-path') ? node.getAttribute('data-autonumber') : null;
+        autonumberText = node.textContent.trim();
         // O número vira numeração do Word, que herda a formatação da marca de
         // parágrafo: guarda como ele aparece (cor, tamanho, peso).
         autonumberStyle = { ...runStyle(node), lineHeight: paraStyle(node).lineHeight };
@@ -250,7 +255,7 @@
     const inkTop = ink.length ? Math.min(...ink.map((r) => r.top + window.scrollY)) : 0;
     const inkBottom = ink.length ? Math.max(...ink.map((r) => r.bottom + window.scrollY)) : 0;
     const middle = centers && ink.length && inkTop - tb.y > 3 && Math.abs((inkTop - tb.y) - (tb.y + tb.h - inkBottom)) < 3 ? true : undefined;
-    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle };
+    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle, autonumberFormat, autonumberText };
   };
 
   const hasBlockChildren = (el) =>
