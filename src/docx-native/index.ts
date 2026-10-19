@@ -151,7 +151,9 @@ const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData
       if (!got) return null;
       const type = typeOf(got.mime, src);
       if (type === 'svg') return image(src, w, h);
-      if (type === 'png' || type === 'jpg') {
+      // JPEG com EXIF pode estar girado (orientação): só o Chromium desenha certo.
+      const rotated = type === 'jpg' && got.data.subarray(0, 65536).includes(Buffer.from('Exif\0\0'));
+      if ((type === 'png' || type === 'jpg') && !rotated) {
         const size = rasterSize(got.data, type);
         if (size && Math.abs(size.w / size.h - w / h) <= 0.02 * (w / h)) return { data: got.data, type };
       }
