@@ -210,13 +210,17 @@ const handleOfficeExport = async (
     const t0 = Date.now();
     try {
       // Limite de tempo: passou disso, entrega o iLovePDF em vez de deixar o
-      // usuário esperando (o nativo continua em segundo plano e é descartado).
+      // usuário esperando (o nativo é cancelado).
       let timer: NodeJS.Timeout | undefined;
+      const abort = new AbortController();
       const render = format === 'docx' ? renderNativeDocx : renderNativePptx;
       const { buffer, title } = await Promise.race([
-        render({ documentId: authed.documentId, workspaceId: authed.workspaceId, appUrl: config.renderBaseUrl }),
+        render({ documentId: authed.documentId, workspaceId: authed.workspaceId, appUrl: config.renderBaseUrl, signal: abort.signal }),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${format} native timed out after ${OFFICE_NATIVE_BUDGET_MS}ms`)), OFFICE_NATIVE_BUDGET_MS);
+          timer = setTimeout(() => {
+            abort.abort(); // fecha a página do nativo: ele para em vez de seguir disputando o Chromium
+            reject(new Error(`${format} native timed out after ${OFFICE_NATIVE_BUDGET_MS}ms`));
+          }, OFFICE_NATIVE_BUDGET_MS);
         }),
       ]).finally(() => clearTimeout(timer));
       logger.info({ documentId: authed.documentId, elapsedMs: Date.now() - t0, bytes: buffer.length }, `${format} native`);

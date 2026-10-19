@@ -73,6 +73,8 @@ type Deco = {
   /** Preenchimento transparente de verdade (PowerPoint); `fill` é a mistura. */
   fillRaw?: Tint;
   shadow?: Shadow[];
+  /** Existe só pelo `fillRaw` (vidro sobre imagem): o Word não vê. */
+  glass?: boolean;
   bgImage?: string;
   border?: Partial<Record<'top' | 'right' | 'bottom' | 'left', Border>>;
   pad?: [number, number, number, number];
@@ -150,4 +152,23 @@ export const readLayout = async (page: Page, meta: RenderMeta): Promise<Document
   const layout = (await page.evaluate(EXTRACT)) as DocumentLayout;
   layout.meta = { ...layout.meta, ...meta };
   return layout;
+};
+
+/**
+ * Tira as caixas que só existem pela transparência (`glass`): o Word não tem
+ * preenchimento transparente e montaria a tabela diferente por causa delas.
+ */
+export const withoutGlass = (layout: DocumentLayout): DocumentLayout => {
+  const strip = (n: LayoutNode): LayoutNode | null => {
+    if (n.k === 'shape') return n.glass ? null : n;
+    if (n.k !== 'box') return n;
+    const kids = n.kids.map(strip).filter((k): k is LayoutNode => k !== null);
+    if (n.glass && kids.length === 1 && kids[0].k === 'text') return { ...kids[0], abs: n.abs };
+    return { ...n, kids };
+  };
+  return {
+    ...layout,
+    pages: layout.pages.map((p) => (p.nav ? { ...p, nav: { ...p.nav, tree: strip(p.nav.tree) ?? p.nav.tree } } : p)),
+    blocks: layout.blocks.map((b) => (b.tree ? { ...b, tree: strip(b.tree) } : b)),
+  };
 };

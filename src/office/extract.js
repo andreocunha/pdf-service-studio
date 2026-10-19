@@ -121,8 +121,8 @@
    * O que está atrás do elemento: a primeira cor de fundo opaca dos pais, ou
    * null quando antes dela vem uma imagem/gradiente (cor desconhecida).
    */
-  const behind = (el) => {
-    for (let e = el.parentElement; e && e !== document.body; e = e.parentElement) {
+  const behind = (el, self = false) => {
+    for (let e = self ? el : el.parentElement; e && e !== document.body; e = e.parentElement) {
       const cs = getComputedStyle(e);
       if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
       const m = rgbaOf(cs.backgroundColor);
@@ -138,7 +138,7 @@
    * vidro claro da capa: sem preenchimento (branco chapado escondia o texto
    * claro), e a borda dele fica na cor cheia — é o contorno do quadro.
    */
-  const blend = (el, c, line = false) => {
+  const blend = (el, c, line = false, self = false) => {
     const m = c && rgbaOf(c);
     if (!m) return null;
     let alpha = m[4] === undefined ? 1 : Number(m[4]);
@@ -147,7 +147,7 @@
     const rgb = [m[1], m[2], m[3]].map(Number);
     const hex = (c) => c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
     const mix = (back) => back.map((b, i) => b + (rgb[i] - b) * alpha);
-    const back = alpha >= 0.95 ? [255, 255, 255] : behind(el);
+    const back = alpha >= 0.95 ? [255, 255, 255] : behind(el, self);
     if (back) return hex(mix(back));
     // Atrás é imagem: vidro claro (branco translúcido) sairia branco chapado.
     if (alpha < 0.5 && rgb.every((v) => v > 235)) return line ? hex(rgb) : null;
@@ -159,7 +159,9 @@
     const d = {};
     const fill = solidFill(el, cs);
     if (fill) d.fill = fill;
-    const fillRaw = fill && translucent(el, cs.backgroundColor);
+    // Independe do `fill`: vidro claro sobre imagem não tem preenchimento no
+    // Word, mas no PowerPoint tem (transparente). Só ele = `glass` (o Word tira).
+    const fillRaw = translucent(el, cs.backgroundColor);
     if (fillRaw) d.fillRaw = fillRaw;
     const shadow = shadows(el, cs);
     if (shadow) d.shadow = shadow;
@@ -202,7 +204,8 @@
    */
   const textColor = (el, cs) => {
     const t = translucent(el, cs.color);
-    if (t && behind(el)) return { color: blend(el, cs.color) || color(cs.color) || '000000' };
+    // O texto fica por cima do fundo do próprio elemento (não só dos pais).
+    if (t && behind(el, true)) return { color: blend(el, cs.color, false, true) || color(cs.color) || '000000' };
     return { color: color(cs.color) || '000000', alpha: t?.alpha };
   };
 
@@ -496,7 +499,8 @@
       (!hasBlockChildren(el) && el.textContent.trim() && ![...el.querySelectorAll('img,svg')].length);
     if (isText) {
       const t = textLeaf(el, link);
-      if (t && (deco.fill || deco.border || deco.pad)) {
+      if (t && (deco.fill || deco.border || deco.pad || deco.fillRaw)) {
+        if (!deco.fill && !deco.border && !deco.pad) deco.glass = true;
         return { k: 'box', id: mark(el, deco), box: b, ...deco, abs: positioned, layout: layoutOf(cs), kids: [t] };
       }
       if (t) t.abs = positioned;
@@ -529,6 +533,7 @@
     if (!kids.length) {
       // Caixa vazia com cor = forma (barra, linha divisória, quadrado).
       if (deco.fill || deco.border || deco.bgImage) return { k: 'shape', id: mark(el, deco), box: b, ...deco, abs: positioned };
+      if (deco.fillRaw) return { k: 'shape', id: mark(el, deco), box: b, ...deco, glass: true, abs: positioned };
       return null;
     }
     return { k: 'box', id: mark(el, deco), box: b, ...deco, abs: positioned, layout: layoutOf(cs), kids };

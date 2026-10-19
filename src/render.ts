@@ -65,7 +65,7 @@ export type RenderedPage = { page: Page; meta: RenderMeta; fonts: UsedFont[] };
  * Word nativo — os dois leem exatamente o mesmo layout.
  */
 export const withRenderPage = async <T>(
-  args: { documentId: string; workspaceId: string },
+  args: { documentId: string; workspaceId: string; signal?: AbortSignal },
   fn: (rendered: RenderedPage) => Promise<T>,
 ): Promise<T> => {
   const token = signRenderToken(args.documentId, args.workspaceId);
@@ -73,8 +73,13 @@ export const withRenderPage = async <T>(
 
   const browser = await getBrowser();
   const page = await browser.newPage();
+  // Cancelado (o Word/PowerPoint nativo estourou o prazo): fecha a página —
+  // o que estiver rodando nela falha e para, em vez de seguir em segundo plano.
+  const onAbort = () => void page.close().catch(() => undefined);
+  args.signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
+    if (args.signal?.aborted) throw new Error('render aborted');
     // Começa com viewport A4 — será ajustada pra largura real da página
     // após o render page expor __PDF_META.
     await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 1 });
@@ -178,6 +183,7 @@ export const withRenderPage = async <T>(
 
     return await fn({ page, meta, fonts });
   } finally {
+    args.signal?.removeEventListener('abort', onAbort);
     await page.close().catch(() => undefined);
   }
 };

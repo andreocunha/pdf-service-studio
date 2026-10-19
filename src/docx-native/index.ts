@@ -9,7 +9,7 @@ import { Packer } from 'docx';
 import { embedFonts } from '../docx-fonts.js';
 import { makeAssets, SCALE } from '../office/assets.js';
 import { loadFontResolver } from '../office/fonts.js';
-import { readLayout } from '../office/layout.js';
+import { readLayout, withoutGlass } from '../office/layout.js';
 import { coverPagesOf, pageBackgrounds, type PageOffsets } from '../office/pages.js';
 import { withRenderPage } from '../render.js';
 import { buildDocument, PAGE_FIELD } from './build.js';
@@ -49,10 +49,10 @@ const pageFields = (xml: string, offsets: PageOffsets | null): string =>
     },
   );
 
-export const renderNativeDocx = async (args: { documentId: string; workspaceId: string; appUrl: string }): Promise<{ buffer: Buffer; title: string }> => {
+export const renderNativeDocx = async (args: { documentId: string; workspaceId: string; appUrl: string; signal?: AbortSignal }): Promise<{ buffer: Buffer; title: string }> => {
   const fonts = await loadFontResolver(args.appUrl);
   return withRenderPage(args, async ({ page, meta }) => {
-    const layout = await readLayout(page, meta);
+    const layout = withoutGlass(await readLayout(page, meta));
     // Nitidez das capturas (capa, ícones): só a densidade muda, o layout não.
     await page.setViewport({ width: meta.pageWidthPx, height: meta.pageHeightPx, deviceScaleFactor: SCALE });
     const assets = makeAssets(page);

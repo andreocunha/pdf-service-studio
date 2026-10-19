@@ -165,6 +165,14 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
     return face;
   };
 
+  // Número do primeiro slide: o Studio pode não contar a capa ("02/28" na 3ª
+  // página). O PowerPoint só aceita de 0 a 9999 — fora disso o número vai
+  // como texto (não acompanha se mudar a ordem dos slides, mas aparece certo).
+  const numbered = layout.pages.findIndex((p) => p.footer?.number);
+  const firstOffsets = numbered >= 0 ? pageNumbering(layout, layout.pages[numbered].index) : null;
+  const firstNum = 1 + (firstOffsets?.current ?? 0);
+  const fieldOk = firstNum >= 0 && firstNum <= 9999;
+
   const slides: BuiltSlide[] = [];
   for (const [slideIndex, page] of layout.pages.entries()) {
     const origin = { x: page.box.x, y: page.box.y };
@@ -258,7 +266,7 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
       }
       const sides = n.border ?? {};
       const list = (['top', 'right', 'bottom', 'left'] as const).map((s) => sides[s]);
-      const fill = n.fill ? n.fillRaw ?? n.fill : null;
+      const fill = n.fillRaw ?? n.fill ?? null;
       if (!fill && !list.some(Boolean)) return;
       // Sombra sem desfoque (anel "0 0 0 6px" em volta do ícone): forma maior atrás, na cor dela.
       for (const s of n.shadow ?? []) {
@@ -538,7 +546,7 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
       const face = faceOf(r);
       const plain = (t: string) => runXml(r, t, face, undefined);
       // Página: campo do PowerPoint (acompanha se mudar a ordem dos slides). O total é texto.
-      const field = (padded && current >= 0 && current < 10 ? plain('0') : '') + runXml(r, String(current), face, undefined, 'fld');
+      const field = (padded && current >= 0 && current < 10 ? plain('0') : '') + (fieldOk ? runXml(r, String(current), face, undefined, 'fld') : plain(String(current)));
       const runs =
         format === 'page' ? field
         : format === 'page-of-total' ? plain('Página ') + field + plain(` de ${total}`)
@@ -560,8 +568,6 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
     slides.push({ xml, rels });
   }
 
-  const first = layout.pages.findIndex((p) => p.footer?.number);
-  const offsets = first >= 0 ? pageNumbering(layout, layout.pages[first].index) : null;
   const mainFace = [...usage.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
   return {
     slides,
@@ -569,6 +575,6 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
     used,
     mainFace,
     size: { w: layout.meta.pageWidthPx, h: layout.meta.pageHeightPx },
-    firstSlideNum: 1 + (offsets?.current ?? 0),
+    firstSlideNum: fieldOk ? firstNum : 1,
   };
 };

@@ -139,7 +139,7 @@ const pack = async (deck: Deck, title: string, fontsUrl: string): Promise<Buffer
     ]),
   );
   // Tamanho do slide = tamanho da página do Studio (o PowerPoint aceita de 1 a 56 polegadas).
-  const clamp = (v: number) => Math.min(51206400, Math.max(914400, emu(v)));
+  const clamp = (v: number) => Math.min(51206400, Math.max(914400, emu(v))); // renderNativePptx já recusa fora disso
   put(
     'ppt/presentation.xml',
     `${XML}<p:presentation xmlns:a="${NS_A}" xmlns:r="${NS_R}" xmlns:p="${NS_P}" saveSubsetFonts="1"${fonts.list ? ' embedTrueTypeFonts="1"' : ''}${deck.firstSlideNum !== 1 ? ` firstSlideNum="${deck.firstSlideNum}"` : ''}>` +
@@ -181,9 +181,14 @@ const pack = async (deck: Deck, title: string, fontsUrl: string): Promise<Buffer
   return Buffer.from(zipSync(files, { level: 6 }));
 };
 
-export const renderNativePptx = async (args: { documentId: string; workspaceId: string; appUrl: string }): Promise<{ buffer: Buffer; title: string }> => {
+export const renderNativePptx = async (args: { documentId: string; workspaceId: string; appUrl: string; signal?: AbortSignal }): Promise<{ buffer: Buffer; title: string }> => {
   const fonts = await loadFontResolver(args.appUrl);
   return withRenderPage(args, async ({ page, meta }) => {
+    // O PowerPoint só aceita slide de 1 a 56 polegadas: página contínua
+    // muito longa sairia cortada — falha aqui e o /pptx cai no iLovePDF.
+    for (const v of [meta.pageWidthPx, meta.pageHeightPx]) {
+      if (emu(v) < 914400 || emu(v) > 51206400) throw new Error(`página de ${Math.round(v)}px não cabe num slide`);
+    }
     const layout = await readLayout(page, meta);
     // Nitidez das capturas (ícones, gradientes): só a densidade muda, o layout não.
     await page.setViewport({ width: meta.pageWidthPx, height: meta.pageHeightPx, deviceScaleFactor: SCALE });
