@@ -162,6 +162,7 @@
     let autonumberStyle = null;
     let autonumberFormat = null;
     let autonumberText = null;
+    const multiNumber = el.querySelectorAll('[data-autonumber]').length > 1;
     const open = (source, list) => {
       current = { ...paraStyle(source), runs: [], list };
       // Item de lista: onde o texto do item começa, e o vão do marcador
@@ -197,14 +198,15 @@
       if (node.hasAttribute('data-autonumber')) {
         // Número no meio do parágrafo ("Capítulo II"): a lista do Word só põe
         // número no começo, então vai como texto, no lugar dele.
-        if (current && current.runs.some((r) => r.t && r.t.trim())) {
+        // Vários números no mesmo bloco ("i) A … ii) B"): cada um no seu lugar, como texto.
+        if (multiNumber || (current && current.runs.some((r) => r.t && r.t.trim()))) {
           const text = node.textContent;
           if (text) current.runs.push({ t: text, ...runStyle(node), link: linkRef || null, width: node.getBoundingClientRect().width, lines: 1 });
           return;
         }
         // Com estilo ("c", "IV"), o caminho real vem no atributo; o texto é o que aparece.
         autonumber = node.getAttribute('data-autonumber-path') || node.textContent.trim();
-        autonumberFormat = node.getAttribute('data-autonumber-path') ? node.getAttribute('data-autonumber') : null;
+        autonumberFormat = node.getAttribute('data-autonumber-path') ? (node.getAttribute('data-autonumber') || '').trim() : null;
         autonumberText = node.textContent.trim();
         // O número vira numeração do Word, que herda a formatação da marca de
         // parágrafo: guarda como ele aparece (cor, tamanho, peso).
