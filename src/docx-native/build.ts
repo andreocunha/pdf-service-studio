@@ -45,7 +45,7 @@ import {
 
 import type { Face } from '../docx-fonts.js';
 import type { FontResolver } from './fonts.js';
-import type { Box, DocumentLayout, LayoutNode, Para, Run } from './layout.js';
+import type { Box, DocumentLayout, FooterNumberFormat, LayoutNode, Para, Run } from './layout.js';
 
 // ---------------------------------------------------------------------------
 // Unidades
@@ -146,6 +146,8 @@ type Ctx = {
   clauses: number[];
   /** Instância da numeração de cláusulas: muda quando o Studio recomeça em 1 (anexo). */
   clauseInstance?: number;
+  /** Estilo de cada nível da lista de cláusulas ('' = 1.2.3), fixado pelo primeiro uso. */
+  clauseFormats: (string | undefined)[];
 };
 
 type ListFormat = 'lowerRoman' | 'upperRoman' | 'lowerLetter' | 'upperLetter' | 'decimal';
@@ -1055,6 +1057,9 @@ const manualClause = (node: Extract<LayoutNode, { k: 'text' }>, p: PIR, ctx: Ctx
   const level = parts.length - 1;
   const expected = [...ctx.clauses.slice(0, level), (ctx.clauses[level] ?? 0) + 1];
   if (parts.join('.') !== expected.join('.')) return false;
+  // Número digitado é decimal (caminho 1.2.3): só entra num nível sem estilo.
+  if ((ctx.clauseFormats[level] ?? '') !== '') return false;
+  ctx.clauseFormats[level] ??= '';
   const first = p.runs.find((r) => r.kind === 'text') as Extract<RunIR, { kind: 'text' }>;
   p.mark = { run: { ...first.run, letterSpacing: first.spacing !== undefined ? first.spacing / 15 : first.run.letterSpacing }, face: first.face };
   p.runs = [];
@@ -1145,9 +1150,30 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
     // formatação da marca de parágrafo).
     // Studio recomeçou em 1 (anexo depois do contrato): numeração nova no Word.
     const parts = node.autonumber.split('.').filter(Boolean).map(Number);
-    if (level === 0 && parts[0] === 1 && ctx.clauses.length) ctx.clauseInstance = ++ctx.instances;
-    target.numbering = { ref: 'clauses', level: Math.max(0, Math.min(level, 2)), instance: ctx.clauseInstance };
-    ctx.clauses = node.autonumber.split('.').filter(Boolean).map(Number);
+    const format = CLAUSE_FORMATS[node.autonumberFormat ?? ''] ? node.autonumberFormat ?? '' : '';
+    const clauseLevel = Math.max(0, Math.min(level, CLAUSE_LEVELS - 1));
+    // Studio recomeçou em 1 (anexo depois do contrato): numeração nova no Word.
+    const restart = level === 0 && parts[0] === 1 && ctx.clauses.length > 0;
+    // O que a lista do Word escreveria aqui: o nível seguinte ao último número
+    // dela (níveis acima vazios contam 1, como no Studio).
+    const from = restart ? [] : ctx.clauses;
+    const expected = [...Array.from({ length: clauseLevel }, (_, i) => from[i] || 1), (from[clauseLevel] ?? 0) + 1];
+    if (level >= CLAUSE_LEVELS || parts.join('.') !== expected.join('.') || (ctx.clauseFormats[clauseLevel] ?? format) !== format) {
+      // Número que a lista do Word não reproduz (override de anexo, recomeço
+      // pelo meio, estilo diferente do que o nível já usa): vai como texto,
+      // igual ao Studio, e a lista do Word não anda.
+      const style = node.autonumberStyle;
+      const run: Run = { ...(style ?? target.runs.find((r) => r.kind === 'text')?.run ?? ({} as Run)), t: '', link: null };
+      const face = style ? ctx.fonts.resolve(style.font, style.weight, style.italic) : null;
+      if (face) ctx.used.add(face);
+      target.runs.unshift({ kind: 'text', text: node.autonumberText ?? node.autonumber, run, face });
+      return out;
+    }
+    // O estilo do nível só se fixa com um item aceito.
+    ctx.clauseFormats[clauseLevel] ??= format;
+    if (restart) ctx.clauseInstance = ++ctx.instances;
+    target.numbering = { ref: 'clauses', level: clauseLevel, instance: ctx.clauseInstance };
+    ctx.clauses = parts;
     const style = node.autonumberStyle;
     if (style) {
       const run: Run = { ...style, t: '', link: null };
@@ -2241,6 +2267,15 @@ const toTable = (t: TIR): Table => {
 /** Marcador trocado depois (index.ts) pelos campos PAGE/NUMPAGES do Word. */
 export const PAGE_FIELD = '§LEXPAGE§';
 
+/** Níveis da numeração automática do Studio e os estilos do marcador. */
+const CLAUSE_LEVELS = 6;
+const CLAUSE_FORMATS: Record<string, (typeof LevelFormat)[keyof typeof LevelFormat]> = {
+  '': LevelFormat.DECIMAL, '1': LevelFormat.DECIMAL,
+  a: LevelFormat.LOWER_LETTER, A: LevelFormat.UPPER_LETTER,
+  i: LevelFormat.LOWER_ROMAN, I: LevelFormat.UPPER_ROMAN,
+};
+export type PageOffsets = { current: number; total: number; format: FooterNumberFormat };
+
 /**
  * Rodapé do Studio (texto + "02/28") → rodapé do Word: tabela sem borda com
  * o texto e a numeração como campo (atualiza sozinha quando o conteúdo cresce).
@@ -2248,7 +2283,7 @@ export const PAGE_FIELD = '§LEXPAGE§';
 type BuiltFooter = {
   footer: Footer;
   distance: number;
-  offsets: { current: number; total: number } | null;
+  offsets: PageOffsets | null;
   atTop?: { blocks: () => (Paragraph | Table)[]; top: number };
 };
 
@@ -2258,8 +2293,9 @@ const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: num
   // Sem rodapé: parágrafo mínimo — um vazio no estilo Normal ocupava uma linha no pé da capa.
   if (!footer?.number) return { footer: new Footer({ children: [new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] })] }), distance: 0, offsets: null };
   const num = footer.number;
-  const [current, total] = num.text.split('/').map((v) => Number(v));
-  const offsets = { current: current - (pageIndex + 1), total: total - layout.pages.length };
+  // "01/12", "1" ou "Página 1 de 12": o 1º número é a página, o 2º o total.
+  const [current = pageIndex + 1, total = layout.pages.length] = (num.text.match(/\d+/g) ?? []).map(Number);
+  const offsets: PageOffsets = { current: current - (pageIndex + 1), total: total - layout.pages.length, format: num.format ?? 'page-total' };
   const numFace = ctx.fonts.resolve(num.style.font, num.style.weight, num.style.italic);
   if (numFace) ctx.used.add(numFace);
   // Número com folga (o Word desenha "06/09" um pouco mais largo e quebrava).
@@ -2311,7 +2347,7 @@ export type BuildInput = {
 };
 
 export const buildDocument = async ({ layout, fonts, assets, background, coverPages }: BuildInput) => {
-  const ctx: Ctx = { fonts, assets, used: new Set(), pending: [], usage: new Map(), lists: new Map(), seq: null, instances: 0, clauses: [] };
+  const ctx: Ctx = { fonts, assets, used: new Set(), pending: [], usage: new Map(), lists: new Map(), seq: null, instances: 0, clauses: [], clauseFormats: [] };
   const { meta } = layout;
   const pageW = meta.pageWidthPx;
   const pageH = meta.pageHeightPx;
@@ -2403,7 +2439,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   const coverBottom = new Map<number, number>();
   /** Bloco → onde vai o indicador dele se for destino de link (o título, senão o primeiro parágrafo). */
   const targets = new Map<string, PIR>();
-  let pageOffsets: { current: number; total: number } | null = null;
+  let pageOffsets: PageOffsets | null = null;
   // Onde o conteúdo anterior terminou. Atravessa a troca de seção contínua (só
   // a aba do menu mudou): o vão é o do Studio, não a distância do topo da página.
   let cursor: { page: number; y: number; slide: boolean } | null = null;
@@ -2702,10 +2738,13 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
       config: [
         {
           reference: 'clauses',
-          levels: [0, 1, 2].map((level) => ({
+          levels: Array.from({ length: CLAUSE_LEVELS }, (_, level) => ({
             level,
-            format: LevelFormat.DECIMAL,
-            text: ['%1', '%1.%2', '%1.%2.%3'][level],
+            // Sem estilo: caminho 1.2.3 (isLgl força decimal mesmo sob um nível em romano).
+            // Com estilo: só o contador do nível, no formato do Studio.
+            format: CLAUSE_FORMATS[ctx.clauseFormats[level] ?? ''] ?? LevelFormat.DECIMAL,
+            text: ctx.clauseFormats[level] ? `%${level + 1}` : Array.from({ length: level + 1 }, (_, i) => `%${i + 1}`).join('.'),
+            isLegalNumberingStyle: !ctx.clauseFormats[level],
             suffix: LevelSuffix.NOTHING,
             alignment: AlignmentType.LEFT,
             // Sem recuo: o estilo "Parágrafo da Lista" põe 1,27 cm, que

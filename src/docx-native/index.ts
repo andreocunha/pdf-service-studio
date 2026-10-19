@@ -10,7 +10,7 @@ import type { Page } from 'puppeteer-core';
 import { getBrowser } from '../browser.js';
 import { embedFonts } from '../docx-fonts.js';
 import { withRenderPage } from '../render.js';
-import { buildDocument, PAGE_FIELD, type Assets } from './build.js';
+import { buildDocument, PAGE_FIELD, type Assets, type PageOffsets } from './build.js';
 import { loadFontResolver } from './fonts.js';
 import type { Box, DocumentLayout } from './layout.js';
 import { readFileSync } from 'node:fs';
@@ -57,29 +57,108 @@ const svgToPng = async (svg: Buffer, w: number, h: number): Promise<Buffer> => {
   }
 };
 
-const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData | null>> } => {
+/** Largura × altura de PNG/JPEG pelo cabeçalho (sem decodificar). */
+const rasterSize = (data: Buffer, type: string): { w: number; h: number } | null => {
+  if (type === 'png' && data.length > 24) return { w: data.readUInt32BE(16), h: data.readUInt32BE(20) };
+  if (type !== 'jpg') return null;
+  for (let i = 2; i + 9 < data.length; ) {
+    if (data[i] !== 0xff) return null;
+    const marker = data[i + 1];
+    const len = data.readUInt16BE(i + 2);
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+      return { w: data.readUInt16BE(i + 7), h: data.readUInt16BE(i + 5) };
+    }
+    i += 2 + len;
+  }
+  return null;
+};
+
+/**
+ * Imagem raster redesenhada pelo Chromium no tamanho da caixa, a partir dos
+ * bytes já baixados (data URL — sem segundo download nem URL no HTML), com o
+ * enquadramento do Studio: o Word estica a imagem até a caixa (o editor
+ * recorta com cover) e não lê WebP (a importação do Studio converte fotos
+ * para WebP — o fundo sumia no .docx). `cover` sai em JPEG (fundo opaco,
+ * arquivo menor); `contain` em PNG (preserva transparência).
+ */
+const redraw = async (data: Buffer, mime: string, w: number, h: number, fit: 'cover' | 'contain'): Promise<ImageData | null> => {
+  const browser = await getBrowser();
+  const tab = await browser.newPage();
+  try {
+    await tab.setViewport({ width: Math.ceil(w), height: Math.ceil(h), deviceScaleFactor: SCALE });
+    await tab.setContent(
+      `<html><body style="margin:0;background:transparent"><img style="display:block;width:${w}px;height:${h}px;object-fit:${fit};object-position:center"></body></html>`,
+    );
+    const ok = await tab.evaluate(
+      `new Promise((done) => { const i = document.querySelector('img'); i.onload = () => done(i.naturalWidth > 0); i.onerror = () => done(false); i.src = ${JSON.stringify(`data:${mime};base64,${data.toString('base64')}`)}; setTimeout(() => done(false), 15000); })`,
+    );
+    if (!ok) return null;
+    const clip = { x: 0, y: 0, width: w, height: h };
+    return fit === 'cover'
+      ? { data: Buffer.from(await tab.screenshot({ type: 'jpeg', quality: 88, clip })), type: 'jpg' }
+      : { data: Buffer.from(await tab.screenshot({ type: 'png', omitBackground: true, clip })), type: 'png' };
+  } catch {
+    return null;
+  } finally {
+    await tab.close().catch(() => undefined);
+  }
+};
+
+const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData | null>>; pageImage: (src: string, w: number, h: number) => Promise<ImageData | null> } => {
   const cache = new Map<string, Promise<ImageData | null>>();
-  const image = (src: string, w: number, h: number) => {
-    const key = `${src}|${Math.round(w)}x${Math.round(h)}`;
-    let hit = cache.get(key);
+  // Um download por URL, mesmo com a imagem em vários tamanhos/usos.
+  const downloads = new Map<string, Promise<{ data: Buffer; mime: string } | null>>();
+  const download = (src: string) => {
+    let hit = downloads.get(src);
     if (!hit) {
       hit = (async () => {
         try {
           const res = await fetch(src, { signal: AbortSignal.timeout(15_000) });
           if (!res.ok) return null;
-          const data = Buffer.from(await res.arrayBuffer());
-          const type = typeOf(res.headers.get('content-type') ?? '', src);
-          // O navegador desenha o SVG sem distorcer (preserveAspectRatio); o Word estica até a caixa.
-          if (type === 'svg') return { svg: data, data: await svgToPng(data, w, h), type: 'png', aspect: svgAspect(data) };
-          return type ? { data, type } : null;
+          return { data: Buffer.from(await res.arrayBuffer()), mime: (res.headers.get('content-type') ?? '').split(';')[0].trim() };
         } catch {
           return null;
         }
       })();
+      downloads.set(src, hit);
+    }
+    return hit;
+  };
+  const cached = (key: string, make: () => Promise<ImageData | null>) => {
+    let hit = cache.get(key);
+    if (!hit) {
+      hit = make().catch(() => null);
       cache.set(key, hit);
     }
     return hit;
   };
+  const image = (src: string, w: number, h: number) =>
+    cached(`${src}|${Math.round(w)}x${Math.round(h)}`, async () => {
+      const got = await download(src);
+      if (!got) return null;
+      const type = typeOf(got.mime, src);
+      // O navegador desenha o SVG sem distorcer (preserveAspectRatio); o Word estica até a caixa.
+      if (type === 'svg') return { svg: got.data, data: await svgToPng(got.data, w, h), type: 'png', aspect: svgAspect(got.data) };
+      if (type) return { data: got.data, type };
+      // WebP e afins: o Word não lê — vai como PNG desenhado pelo Chromium.
+      return /^image\//.test(got.mime) ? redraw(got.data, got.mime, w, h, 'contain') : null;
+    });
+  /** Fundo de página raster: recorte "cover" como no Studio. PNG/JPEG que já
+   *  têm a proporção da página vão como estão (sem reamostrar). */
+  const pageImage = (src: string, w: number, h: number) =>
+    cached(`page|${src}|${Math.round(w)}x${Math.round(h)}`, async () => {
+      const got = await download(src);
+      if (!got) return null;
+      const type = typeOf(got.mime, src);
+      if (type === 'svg') return image(src, w, h);
+      // JPEG com EXIF pode estar girado (orientação): só o Chromium desenha certo.
+      const rotated = type === 'jpg' && got.data.subarray(0, 65536).includes(Buffer.from('Exif\0\0'));
+      if ((type === 'png' || type === 'jpg') && !rotated) {
+        const size = rasterSize(got.data, type);
+        if (size && Math.abs(size.w / size.h - w / h) <= 0.02 * (w / h)) return { data: got.data, type };
+      }
+      return /^image\//.test(got.mime) ? redraw(got.data, got.mime, w, h, 'cover') : null;
+    });
   /**
    * Captura só o elemento, com fundo transparente: o resto da página some
    * (o texto por cima da arte de um banner sairia duplicado — ele já vai
@@ -124,18 +203,21 @@ const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData
   const raster = (id: number, _box: Box) => capture(id, 'all');
   const paint = (id: number) => capture(id, 'alone');
   const backdrop = (id: number, clip: Box) => capture(id, 'notext', clip);
-  return { image, raster, paint, backdrop, cache };
+  return { image, raster, paint, backdrop, cache, pageImage };
 };
 
 /**
  * Troca o marcador do rodapé pelos campos do Word: página atual e total, com
  * a mesma defasagem do Studio ("02/28" na terceira página) e dois dígitos.
  */
-const pageFields = (xml: string, offsets: { current: number; total: number } | null): string =>
+const pageFields = (xml: string, offsets: PageOffsets | null): string =>
   xml.replace(
     new RegExp(`<w:r>(<w:rPr>(?:(?!</w:r>).)*?</w:rPr>)?<w:t[^>]*>${PAGE_FIELD}</w:t></w:r>`, 'g'),
     (_, rPr = '') => {
       const run = (inner: string) => `<w:r>${rPr}${inner}</w:r>`;
+      // "01/12" leva zero à esquerda (como no Studio); "1" e "Página 1 de 12", não.
+      const padded = (offsets?.format ?? 'page-total') === 'page-total';
+      const pic = padded ? ' \\# "00"' : '';
       const field = (name: string, offset: number) => {
         const inner = offset
           ? [
@@ -146,12 +228,16 @@ const pageFields = (xml: string, offsets: { current: number; total: number } | n
               run('<w:fldChar w:fldCharType="separate"/>'),
               run('<w:t>1</w:t>'),
               run('<w:fldChar w:fldCharType="end"/>'),
-              run(`<w:instrText xml:space="preserve"> ${offset > 0 ? '+' : '-'} ${Math.abs(offset)} \\# "00" </w:instrText>`),
+              run(`<w:instrText xml:space="preserve"> ${offset > 0 ? '+' : '-'} ${Math.abs(offset)}${pic} </w:instrText>`),
             ]
-          : [run('<w:fldChar w:fldCharType="begin"/>'), run(`<w:instrText xml:space="preserve"> ${name} \\# "00" </w:instrText>`)];
-        return [...inner, run('<w:fldChar w:fldCharType="separate"/>'), run('<w:t>01</w:t>'), run('<w:fldChar w:fldCharType="end"/>')].join('');
+          : [run('<w:fldChar w:fldCharType="begin"/>'), run(`<w:instrText xml:space="preserve"> ${name}${pic} </w:instrText>`)];
+        return [...inner, run('<w:fldChar w:fldCharType="separate"/>'), run(`<w:t>${padded ? '01' : '1'}</w:t>`), run('<w:fldChar w:fldCharType="end"/>')].join('');
       };
-      return field('PAGE', offsets?.current ?? 0) + run('<w:t>/</w:t>') + field('NUMPAGES', offsets?.total ?? 0);
+      const page = field('PAGE', offsets?.current ?? 0);
+      const total = () => field('NUMPAGES', offsets?.total ?? 0);
+      if (offsets?.format === 'page') return page;
+      if (offsets?.format === 'page-of-total') return run('<w:t xml:space="preserve">Página </w:t>') + page + run('<w:t xml:space="preserve"> de </w:t>') + total();
+      return page + run('<w:t>/</w:t>') + total();
     },
   );
 
@@ -237,7 +323,7 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
       if (!p.bgImage) return null;
       // Fundo vai como PNG desenhado pelo Chromium: o Word não desenha certo
       // todo SVG (os desenhos do pé do Quadro resumo sumiam) e fundo não se edita.
-      const img = await assets.image(p.bgImage, p.box.w, p.box.h);
+      const img = await assets.pageImage(p.bgImage, p.box.w, p.box.h);
       return img?.svg ? { data: img.data, type: img.type } : img;
     };
 

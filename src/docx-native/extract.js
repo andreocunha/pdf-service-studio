@@ -160,6 +160,10 @@
     let current = null;
     let autonumber = null;
     let autonumberStyle = null;
+    let autonumberFormat = null;
+    let autonumberText = null;
+    // Só os números que aparecem (um escondido não conta).
+    const multiNumber = [...el.querySelectorAll('[data-autonumber]')].filter((m) => !m.closest('[data-editor-only]') && (m.checkVisibility ? m.checkVisibility({ visibilityProperty: true, opacityProperty: true }) : true)).length > 1;
     const open = (source, list) => {
       current = { ...paraStyle(source), runs: [], list };
       // Item de lista: onde o texto do item começa, e o vão do marcador
@@ -193,7 +197,19 @@
       if (!visible(node, cs)) return;
       if (node.matches('a[data-zone-link]')) return; // sobreposição de clique, sem texto
       if (node.hasAttribute('data-autonumber')) {
-        autonumber = node.textContent.trim();
+        // Número no meio do parágrafo ("Capítulo II"): a lista do Word só põe
+        // número no começo, então vai como texto, no lugar dele.
+        // Vários números no mesmo bloco ("i) A … ii) B"): cada um no seu lugar, como texto.
+        if (multiNumber || (current && current.runs.some((r) => r.t && r.t.trim()))) {
+          const text = node.textContent;
+          if (text && !current) open(node.parentElement, list);
+          if (text) current.runs.push({ t: text, ...runStyle(node), link: linkRef || null, width: node.getBoundingClientRect().width, lines: 1 });
+          return;
+        }
+        // Com estilo ("c", "IV"), o caminho real vem no atributo; o texto é o que aparece.
+        autonumber = node.getAttribute('data-autonumber-path') || node.textContent.trim();
+        autonumberFormat = node.getAttribute('data-autonumber-path') ? (node.getAttribute('data-autonumber') || '').trim() : null;
+        autonumberText = node.textContent.trim();
         // O número vira numeração do Word, que herda a formatação da marca de
         // parágrafo: guarda como ele aparece (cor, tamanho, peso).
         autonumberStyle = { ...runStyle(node), lineHeight: paraStyle(node).lineHeight };
@@ -250,7 +266,7 @@
     const inkTop = ink.length ? Math.min(...ink.map((r) => r.top + window.scrollY)) : 0;
     const inkBottom = ink.length ? Math.max(...ink.map((r) => r.bottom + window.scrollY)) : 0;
     const middle = centers && ink.length && inkTop - tb.y > 3 && Math.abs((inkTop - tb.y) - (tb.y + tb.h - inkBottom)) < 3 ? true : undefined;
-    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle };
+    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle, autonumberFormat, autonumberText };
   };
 
   const hasBlockChildren = (el) =>
@@ -392,7 +408,7 @@
         const numberEl = footerEl.querySelector('[data-document-footer-number]');
         footer = {
           text: textEl ? textLeaf(textEl, null) : null,
-          number: numberEl ? { text: numberEl.textContent.trim(), box: box(numberEl), style: runStyle(numberEl), align: getComputedStyle(numberEl).textAlign } : null,
+          number: numberEl ? { text: numberEl.textContent.trim(), format: numberEl.getAttribute('data-document-footer-format') || 'page-total', box: box(numberEl), style: runStyle(numberEl), align: getComputedStyle(numberEl).textAlign } : null,
         };
       }
       // Menu de seções: vai pro cabeçalho do Word; a assinatura (aba ativa

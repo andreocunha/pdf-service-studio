@@ -6,6 +6,9 @@ import { readFileSync } from 'node:fs';
 
 import { withRenderPage, type RenderMeta } from '../render.js';
 
+/** Formato do número do rodapé do Studio (`data-document-footer-format`). */
+export type FooterNumberFormat = 'page-total' | 'page' | 'page-of-total';
+
 export type Border = { w: number; color: string };
 export type Box = { x: number; y: number; w: number; h: number };
 export type Run = {
@@ -62,6 +65,10 @@ export type LayoutNode =
       middle?: boolean;
       autonumber: string | null;
       autonumberStyle?: (Omit<Run, 't' | 'br' | 'link'> & { lineHeight: number | null }) | null;
+      /** Estilo do número no Studio (`a`, `A`, `i`, `I`, `1`); null = caminho 1.2.3. */
+      autonumberFormat?: string | null;
+      /** O número como aparece ("c", "IV"). */
+      autonumberText?: string | null;
     } & Deco)
   | { k: 'img'; id: number; box: Box; src: string; abs?: boolean }
   | { k: 'raster'; id: number; box: Box; abs?: boolean }
@@ -83,7 +90,7 @@ export type DocumentLayout = {
     bgColor: string | null;
     footer: {
       text: Extract<LayoutNode, { k: 'text' }> | null;
-      number: { text: string; box: Box; style: Omit<Run, 't' | 'br' | 'link'>; align: string } | null;
+      number: { text: string; format?: FooterNumberFormat; box: Box; style: Omit<Run, 't' | 'br' | 'link'>; align: string } | null;
     } | null;
     nav: { tree: LayoutNode; sig: string } | null;
   }[];
