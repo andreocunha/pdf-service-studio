@@ -1939,7 +1939,9 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
   // com a altura do conteúdo.
   const shot = { ...area, h: Math.max(area.h, Math.ceil(bottom(u)) - y) };
   const image = await ctx.assets.backdrop(tree.id, shot);
-  if (!image) return renderRegion([tree], region, ctx);
+  // Sem a captura: só o texto (o bloco inteiro voltaria pra cá — laço sem fim
+  // até estourar a memória).
+  if (!image) return texts.length ? renderRegion(texts, region, ctx) : [];
   // Sem texto por cima e cabendo na largura (ícones e barra da linha do
   // tempo): imagem na linha do texto, não flutuante — anda com o conteúdo.
   if (!texts.length && shot.x >= region.x - 8 && right(shot) <= right(region) + 8) {

@@ -94,7 +94,8 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"></w:fonts>',
       );
     }
-    await embedFonts(files, used, `${args.appUrl}/word-fonts/`);
+    await embedFonts(files, used, `${args.appUrl}/word-fonts/`, args.signal);
+    args.signal?.throwIfAborted();
     return { buffer: Buffer.from(zipSync(files, { level: 6 })), title: meta.title ?? 'document' };
   });
 };

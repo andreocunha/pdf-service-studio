@@ -49,6 +49,12 @@ const helperTab = async (signal?: AbortSignal) => {
   const tab = await (await getBrowser()).newPage();
   const onAbort = () => void closeNow(tab);
   signal?.addEventListener('abort', onAbort, { once: true });
+  // Cancelado enquanto a aba abria: o evento já passou.
+  if (signal?.aborted) {
+    signal.removeEventListener('abort', onAbort);
+    await closeNow(tab);
+    signal.throwIfAborted();
+  }
   return {
     tab,
     close: async () => {
@@ -144,7 +150,14 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
   const cached = (key: string, make: () => Promise<ImageData | null>) => {
     let hit = cache.get(key);
     if (!hit) {
-      hit = signal?.aborted ? Promise.resolve(null) : make().catch(() => null);
+      // Cancelado: falha (o montador para), em vez de seguir com tudo vazio.
+      hit = signal?.aborted
+        ? Promise.reject(signal.reason)
+        : make().catch((err) => {
+            if (signal?.aborted) throw err;
+            return null;
+          });
+      hit.catch(() => undefined);
       cache.set(key, hit);
     }
     return hit;
@@ -184,7 +197,7 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
    * (bloco complexo — o texto vai editável por cima da captura).
    */
   const capture = async (id: number, mode: 'all' | 'alone' | 'notext', clip?: Box): Promise<ImageData | null> => {
-    if (signal?.aborted) return null;
+    signal?.throwIfAborted();
     const alone = mode === 'alone';
     const el = await page.$(`[data-dx="${id}"]`);
     if (!el) return null;
@@ -206,7 +219,8 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
         // Só a pintura: texto solto direto dentro da caixa também some (ele vai editável por cima).
         const style = document.createElement('style');
         style.id = 'dx-alone';
-        style.textContent = '[data-dx="${id}"] { color: transparent !important; -webkit-text-fill-color: transparent !important; text-decoration-color: transparent !important; text-shadow: none !important; }';
+        // Sem mexer em "color": borda/sombra em currentColor sumiriam junto.
+        style.textContent = '[data-dx="${id}"] { -webkit-text-fill-color: transparent !important; text-decoration-color: transparent !important; text-shadow: none !important; }';
         document.head.appendChild(style);
       }
     })()`);

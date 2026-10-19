@@ -8,7 +8,7 @@ import { strToU8, zipSync, type Zippable } from 'fflate';
 
 import { makeAssets, SCALE } from '../office/assets.js';
 import { ttfToEot } from '../office/eot.js';
-import { embeddableFamilies, fontSlot, loadFontResolver, loadFontFile, type Face } from '../office/fonts.js';
+import { embeddableFamilies, fontSlot, loadFontResolver, loadFontFile, untilAborted, type Face } from '../office/fonts.js';
 import { readLayout } from '../office/layout.js';
 import { pageBackgrounds } from '../office/pages.js';
 import { withRenderPage } from '../render.js';
@@ -60,7 +60,7 @@ const layoutXml = () =>
   `${XML}<p:sldLayout xmlns:a="${NS_A}" xmlns:r="${NS_R}" xmlns:p="${NS_P}" preserve="1" type="blank"><p:cSld name="Em branco">${EMPTY_TREE}</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>`;
 
 /** Fontes usadas embutidas (EOT), pra abrir certo em quem não tem a fonte instalada. */
-const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string) => {
+const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string, signal?: AbortSignal) => {
   const families = embeddableFamilies(used);
   const fontRels: { id: string; target: string }[] = [];
   const entries: string[] = [];
@@ -68,14 +68,16 @@ const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string) => 
   for (const [family, faces] of families) {
     const slots: string[] = [];
     for (const face of faces) {
+      signal?.throwIfAborted();
       try {
-        const ttf = await loadFontFile(new URL(face.file!, baseUrl).href);
+        const ttf = await untilAborted(loadFontFile(new URL(face.file!, baseUrl).href), signal);
         n++;
         files[`ppt/fonts/font${n}.fntdata`] = new Uint8Array(ttfToEot(ttf));
         const id = `rIdFont${n}`;
         fontRels.push({ id, target: `fonts/font${n}.fntdata` });
         slots.push(`<p:${fontSlot(face)} r:id="${id}"/>`);
-      } catch {
+      } catch (err) {
+        if (signal?.aborted) throw err;
         // Sem o arquivo: a fonte fica só pelo nome (abre certo onde estiver instalada).
       }
     }
@@ -84,10 +86,10 @@ const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string) => 
   return { fontRels, list: entries.length ? `<p:embeddedFontLst>${entries.join('')}</p:embeddedFontLst>` : '' };
 };
 
-const pack = async (deck: Deck, title: string, fontsUrl: string): Promise<Buffer> => {
+const pack = async (deck: Deck, title: string, fontsUrl: string, signal?: AbortSignal): Promise<Buffer> => {
   const files: Zippable = {};
   const put = (path: string, xml: string) => (files[path] = strToU8(xml));
-  const fonts = await embedFonts(files, deck.used, fontsUrl);
+  const fonts = await embedFonts(files, deck.used, fontsUrl, signal);
   const n = deck.slides.length;
 
   put(
@@ -178,6 +180,7 @@ const pack = async (deck: Deck, title: string, fontsUrl: string): Promise<Buffer
   });
   for (const m of deck.media) files[`ppt/media/${m.name}`] = [new Uint8Array(m.data), { level: 0 }];
 
+  signal?.throwIfAborted();
   return Buffer.from(zipSync(files, { level: 6 }));
 };
 
@@ -198,7 +201,7 @@ export const renderNativePptx = async (args: { documentId: string; workspaceId: 
     const deck = await buildDeck({ layout, fonts, assets, background });
     args.signal?.throwIfAborted();
     const title = meta.title ?? 'document';
-    return { buffer: await pack(deck, title, `${args.appUrl}/word-fonts/`), title };
+    return { buffer: await pack(deck, title, `${args.appUrl}/word-fonts/`, args.signal), title };
   });
 };
 

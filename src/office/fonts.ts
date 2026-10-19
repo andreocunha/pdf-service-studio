@@ -93,6 +93,21 @@ export const loadFontFile = (url: string): Promise<Buffer> => {
   return file;
 };
 
+/**
+ * Espera a promessa, mas desiste no cancelamento (a exportação estourou o
+ * prazo). O download segue pro cache compartilhado — outra exportação pode
+ * estar esperando o mesmo arquivo.
+ */
+export const untilAborted = <T>(p: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return p;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+};
+
 type CatalogVariant = { file: string; weight: number; style: string; isVariable?: boolean };
 type CatalogFamily = { name: string; folder: string; variants: CatalogVariant[] };
 

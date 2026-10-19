@@ -28,7 +28,7 @@ import { randomUUID } from 'node:crypto';
 
 import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from 'fflate';
 
-import { embeddableFamilies, fontSlot, loadFontFile, loadFonts, type Face, type FontData } from './office/fonts.js';
+import { embeddableFamilies, fontSlot, loadFontFile, loadFonts, untilAborted, type Face, type FontData } from './office/fonts.js';
 
 export type { Face, FontData };
 
@@ -769,13 +769,13 @@ const obfuscate = (ttf: Buffer, guid: string): Uint8Array => {
   return out;
 };
 
-export const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string): Promise<void> => {
+export const embedFonts = async (files: Zippable, used: Set<Face>, baseUrl: string, signal?: AbortSignal): Promise<void> => {
   const byFamily = embeddableFamilies(used);
   if (byFamily.size === 0) return;
   const ttfs = new Map<Face, Buffer>();
   await Promise.all(
     [...byFamily.values()].flat().map(async (face) => {
-      ttfs.set(face, await loadFontFile(new URL(face.file!, baseUrl).href));
+      ttfs.set(face, await untilAborted(loadFontFile(new URL(face.file!, baseUrl).href), signal));
     }),
   );
 
