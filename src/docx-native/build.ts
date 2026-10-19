@@ -1148,12 +1148,18 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
     // Studio recomeçou em 1 (anexo depois do contrato): numeração nova no Word.
     const parts = node.autonumber.split('.').filter(Boolean).map(Number);
     const format = CLAUSE_FORMATS[node.autonumberFormat ?? ''] ? node.autonumberFormat ?? '' : '';
-    const numeric = parts.length > 0 && parts.every((n) => Number.isInteger(n) && n > 0);
     const clauseLevel = Math.max(0, Math.min(level, CLAUSE_LEVELS - 1));
-    if (numeric) ctx.clauseFormats[clauseLevel] ??= format;
-    if (!numeric || ctx.clauseFormats[clauseLevel] !== format) {
-      // Número que a lista do Word não reproduz (override "A-1", ou estilo
-      // diferente do que este nível já usa): vai como texto, igual ao Studio.
+    // Studio recomeçou em 1 (anexo depois do contrato): numeração nova no Word.
+    const restart = level === 0 && parts[0] === 1 && ctx.clauses.length > 0;
+    // O que a lista do Word escreveria aqui: o nível seguinte ao último número
+    // dela (níveis acima vazios contam 1, como no Studio).
+    const from = restart ? [] : ctx.clauses;
+    const expected = [...Array.from({ length: clauseLevel }, (_, i) => from[i] || 1), (from[clauseLevel] ?? 0) + 1];
+    ctx.clauseFormats[clauseLevel] ??= format;
+    if (level >= CLAUSE_LEVELS || parts.join('.') !== expected.join('.') || ctx.clauseFormats[clauseLevel] !== format) {
+      // Número que a lista do Word não reproduz (override de anexo, recomeço
+      // pelo meio, estilo diferente do que o nível já usa): vai como texto,
+      // igual ao Studio, e a lista do Word não anda.
       const style = node.autonumberStyle;
       const run: Run = { ...(style ?? target.runs.find((r) => r.kind === 'text')?.run ?? ({} as Run)), t: '', link: null };
       const face = style ? ctx.fonts.resolve(style.font, style.weight, style.italic) : null;
@@ -1161,7 +1167,7 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
       target.runs.unshift({ kind: 'text', text: node.autonumberText ?? node.autonumber, run, face });
       return out;
     }
-    if (level === 0 && parts[0] === 1 && ctx.clauses.length) ctx.clauseInstance = ++ctx.instances;
+    if (restart) ctx.clauseInstance = ++ctx.instances;
     target.numbering = { ref: 'clauses', level: clauseLevel, instance: ctx.clauseInstance };
     ctx.clauses = parts;
     const style = node.autonumberStyle;
