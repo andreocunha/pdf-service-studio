@@ -9,7 +9,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').cpSync('src/docx-native/extract.js', 'dist/docx-native/extract.js')\"",
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').cpSync('src/office/extract.js', 'dist/office/extract.js')\"",
     "start": "node dist/server.js",
     "dev": "tsx watch --env-file=.env src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -19,7 +19,8 @@
     "test:pdf-print": "node scripts/test-pdf-print.mjs && node scripts/test-pdf-print.mjs --expect-timeout",
     "test:pdf-fidelity": "node --import tsx scripts/fidelity/audit.mts",
     "test:pdf-font-failures": "node --import tsx scripts/fidelity/test-font-failures.mts",
-    "test:docx-fonts": "node --import tsx scripts/test-docx-fonts.mts"
+    "test:docx-fonts": "node --import tsx scripts/test-docx-fonts.mts",
+    "docx:native": "node --env-file=.env --import tsx scripts/docx-native.mts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

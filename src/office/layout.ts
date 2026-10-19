@@ -1,10 +1,12 @@
 /**
- * Leitura do layout do documento na página de render — o mesmo layout que
- * vira PDF — pra montar o Word nativo.
+ * Layout do documento lido na página de render (extract.js) — o mesmo layout
+ * que vira PDF. É a base do Word e do PowerPoint nativos.
  */
 import { readFileSync } from 'node:fs';
 
-import { withRenderPage, type RenderMeta } from '../render.js';
+import type { Page } from 'puppeteer-core';
+
+import type { RenderMeta } from '../render.js';
 
 /** Formato do número do rodapé do Studio (`data-document-footer-format`). */
 export type FooterNumberFormat = 'page-total' | 'page' | 'page-of-total';
@@ -31,6 +33,8 @@ export type Run = {
   width?: number;
   /** Em quantas linhas o trecho ficou no Studio. */
   lines?: number;
+  /** Espaços em sequência viram um só (white-space normal). */
+  collapse?: boolean;
 };
 export type Para = {
   align: 'left' | 'center' | 'right' | 'both';
@@ -41,6 +45,9 @@ export type Para = {
   /** Item de lista: onde o texto começa (px, página) e o vão do marcador antes dele. */
   x?: number;
   indent?: number;
+  /** Meio da primeira e da última linha (px, página). */
+  first?: number;
+  last?: number;
 };
 type Deco = {
   fill?: string;
@@ -69,8 +76,12 @@ export type LayoutNode =
       autonumberFormat?: string | null;
       /** O número como aparece ("c", "IV"). */
       autonumberText?: string | null;
+      /** Onde o número aparece (px, página). */
+      autonumberBox?: Box | null;
+      /** Vão entre o número e o texto que vem depois dele na mesma linha (px). */
+      autonumberGap?: number | null;
     } & Deco)
-  | { k: 'img'; id: number; box: Box; src: string; abs?: boolean }
+  | { k: 'img'; id: number; box: Box; src: string; abs?: boolean; radius?: number }
   | { k: 'raster'; id: number; box: Box; abs?: boolean }
   | ({ k: 'shape'; id: number; box: Box } & Deco)
   | ({
@@ -97,10 +108,24 @@ export type DocumentLayout = {
   blocks: LayoutBlock[];
 };
 
+/**
+ * Texto de uma linha só no Studio: pelas linhas medidas de cada trecho (a
+ * caixa pode ser mais alta que o texto — rótulo centralizado numa linha de
+ * 41px); sem medida, pela altura.
+ */
+export const isOneLine = (n: Extract<LayoutNode, { k: 'text' }>): boolean => {
+  if (n.paras.length !== 1) return false;
+  if (n.paras[0].runs.some((r) => r.br)) return false;
+  const runs = n.paras[0].runs.filter((r) => r.t);
+  if (runs.length && runs.every((r) => r.lines !== undefined)) return runs.every((r) => (r.lines ?? 1) <= 1);
+  return n.box.h < (n.paras[0].lineHeight ?? n.paras[0].fontSize * 1.2) * 1.5;
+};
+
 const EXTRACT = readFileSync(new URL('./extract.js', import.meta.url), 'utf8');
 
-export const readLayout = (args: { documentId: string; workspaceId: string }) =>
-  withRenderPage(args, async ({ page }) => {
-    const layout = (await page.evaluate(EXTRACT)) as DocumentLayout;
-    return { layout, page };
-  });
+/** Lê o layout da página de render já pronta (depois do __PDF_READY). */
+export const readLayout = async (page: Page, meta: RenderMeta): Promise<DocumentLayout> => {
+  const layout = (await page.evaluate(EXTRACT)) as DocumentLayout;
+  layout.meta = { ...layout.meta, ...meta };
+  return layout;
+};

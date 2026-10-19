@@ -1,8 +1,8 @@
 /*
  * Roda DENTRO da página /render-pdf (mesma que gera o PDF), depois do
  * __PDF_READY. Lê o documento já diagramado e devolve uma árvore com a
- * geometria real de cada bloco — o builder (build.ts) transforma isso em
- * Word seguindo o guia da Lex (tabelas, nada flutuante, numeração automática).
+ * geometria real de cada bloco — os montadores transformam isso em
+ * Word (docx-native/build.ts) e PowerPoint (pptx-native/build.ts).
  *
  * JavaScript puro de propósito: é injetado como texto (page.evaluate), então
  * não pode depender de helpers que o bundler injeta.
@@ -162,6 +162,9 @@
     let autonumberStyle = null;
     let autonumberFormat = null;
     let autonumberText = null;
+    // Onde o número aparece e o vão até o texto que vem depois dele (PowerPoint: o número vai como texto).
+    let autonumberBox = null;
+    let autonumberGap = null;
     // Só os números que aparecem (um escondido não conta).
     const multiNumber = [...el.querySelectorAll('[data-autonumber]')].filter((m) => !m.closest('[data-editor-only]') && (m.checkVisibility ? m.checkVisibility({ visibilityProperty: true, opacityProperty: true }) : true)).length > 1;
     const open = (source, list) => {
@@ -189,7 +192,23 @@
         const width = rects.reduce((sum, r) => sum + r.width, 0);
         // Linhas do trecho: o espaço onde a linha quebrou não entra na largura.
         const lines = new Set(rects.map((r) => Math.round(r.top))).size;
-        current.runs.push({ t: text.replace(/\n/g, ' '), ...runStyle(node.parentElement), link: linkRef || null, width, lines });
+        // Meio da primeira e da última linha do parágrafo: dá o espaço entre parágrafos (margem do <ul>, do <p>).
+        const mid = (r) => r.top + r.height / 2 + window.scrollY;
+        const solid = rects.filter((r) => r.width > 0);
+        if (solid.length && text.trim()) {
+          if (current.first === undefined) current.first = mid(solid[0]);
+          current.last = mid(solid[solid.length - 1]);
+        }
+        if (autonumberBox && autonumberGap === null && text.trim() && rects.length) {
+          const first = rects[0];
+          const top = first.top + window.scrollY;
+          if (Math.abs(top + first.height / 2 - (autonumberBox.y + autonumberBox.h / 2)) < first.height) {
+            autonumberGap = Math.max(0, first.left + window.scrollX - (autonumberBox.x + autonumberBox.w));
+          }
+        }
+        // Espaço em branco que o navegador junta (white-space normal): o PowerPoint precisa saber.
+        const collapse = /^(normal|nowrap)$/.test(getComputedStyle(node.parentElement).whiteSpace) || undefined;
+        current.runs.push({ t: text.replace(/\n/g, ' '), ...runStyle(node.parentElement), link: linkRef || null, width, lines, collapse });
         return;
       }
       if (node.nodeType !== 1) return;
@@ -213,6 +232,7 @@
         // O número vira numeração do Word, que herda a formatação da marca de
         // parágrafo: guarda como ele aparece (cor, tamanho, peso).
         autonumberStyle = { ...runStyle(node), lineHeight: paraStyle(node).lineHeight };
+        autonumberBox = box(node);
         return;
       }
       if (node.tagName === 'BR') {
@@ -266,7 +286,7 @@
     const inkTop = ink.length ? Math.min(...ink.map((r) => r.top + window.scrollY)) : 0;
     const inkBottom = ink.length ? Math.max(...ink.map((r) => r.bottom + window.scrollY)) : 0;
     const middle = centers && ink.length && inkTop - tb.y > 3 && Math.abs((inkTop - tb.y) - (tb.y + tb.h - inkBottom)) < 3 ? true : undefined;
-    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle, autonumberFormat, autonumberText };
+    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle, autonumberFormat, autonumberText, autonumberBox, autonumberGap };
   };
 
   const hasBlockChildren = (el) =>
@@ -292,6 +312,8 @@
     const abs = cs.position === 'absolute' || cs.position === 'fixed';
     if (tag === 'IMG') {
       el.setAttribute('data-dx', String(nextId));
+      const r = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => parseFloat(cs[`border${c}Radius`]) || 0));
+      const radius = r > 0.5 ? r : undefined;
       // object-fit: a imagem desenhada não é a caixa. "contain" encolhe
       // mantendo a proporção (o Word esticaria até a caixa); "cover" recorta
       // — só a captura mostra igual.
@@ -306,10 +328,10 @@
           const w = nw * k;
           const h = nh * k;
           const drawn = { x: b.x + (b.w - w) * (px ?? 0.5), y: b.y + (b.h - h) * (py ?? 0.5), w, h };
-          return { k: 'img', id: nextId++, box: drawn, src: el.currentSrc || el.src, abs };
+          return { k: 'img', id: nextId++, box: drawn, src: el.currentSrc || el.src, abs, radius };
         }
       }
-      return { k: 'img', id: nextId++, box: b, src: el.currentSrc || el.src, abs };
+      return { k: 'img', id: nextId++, box: b, src: el.currentSrc || el.src, abs, radius };
     }
     // Ícone desenhado com máscara CSS (cor recortada no formato do ícone):
     // só a captura mostra o desenho — a caixa em si é só a cor.
