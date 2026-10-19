@@ -55,17 +55,30 @@ export const renderDocumentPreview = async (args: {
           .filter((el) => !el.parentElement?.closest('[data-block-id]'));
         const last = blocks.at(-1);
         // Bloco fullWidth no pé da página sangra a margem de baixo de propósito
-        // (margin-bottom negativo): a capa de página inteira não "estourou".
-        const bleed = last ? Math.max(0, -parseFloat(getComputedStyle(last).marginBottom || '0')) : 0;
-        const limit = box.top + box.height - Math.max(0, paddingBottom - bleed);
+        // (margin-bottom negativo, ver Block.tsx): a capa de
+        // página inteira não "estourou". Só ele ganha essa folga; cada bloco é
+        // medido contra o próprio limite.
+        const baseLimit = box.top + box.height - paddingBottom;
+        const lastCs = last ? getComputedStyle(last) : null;
+        // fullWidth = ocupa a largura inteira da página (margem lateral negativa
+        // sozinha não basta: blocos comuns têm -ml-12 no editor).
+        const lastBleeds = !!lastCs && !!last && parseFloat(lastCs.marginBottom) < 0
+          && last.getBoundingClientRect().width >= box.width - 2;
+        const bleed = lastBleeds ? Math.min(paddingBottom, -parseFloat(lastCs!.marginBottom)) : 0;
         let bottom = box.top;
-        for (const el of blocks) bottom = Math.max(bottom, el.getBoundingClientRect().bottom);
+        let overflow = false;
+        for (const el of blocks) {
+          const elBottom = el.getBoundingClientRect().bottom;
+          bottom = Math.max(bottom, elBottom);
+          if (elBottom > baseLimit + (el === last ? bleed : 0) + 1) overflow = true;
+        }
+        const limit = baseLimit + (lastBleeds && last && last.getBoundingClientRect().bottom >= bottom - 1 ? bleed : 0);
         return {
           index,
           blockIds: blocks.map((el) => el.dataset.blockId ?? ''),
           lastBlock: last ? { id: last.dataset.blockId ?? '', type: last.dataset.blockType ?? '' } : null,
           emptyBottomPx: blocks.length ? Math.max(0, Math.round(limit - bottom)) : Math.round(box.height),
-          overflow: bottom > limit + 1,
+          overflow,
           contentBottomPx: Math.round(bottom - box.top),
         };
       });
