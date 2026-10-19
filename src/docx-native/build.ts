@@ -1057,6 +1057,9 @@ const manualClause = (node: Extract<LayoutNode, { k: 'text' }>, p: PIR, ctx: Ctx
   const level = parts.length - 1;
   const expected = [...ctx.clauses.slice(0, level), (ctx.clauses[level] ?? 0) + 1];
   if (parts.join('.') !== expected.join('.')) return false;
+  // Número digitado é decimal (caminho 1.2.3): só entra num nível sem estilo.
+  if ((ctx.clauseFormats[level] ?? '') !== '') return false;
+  ctx.clauseFormats[level] ??= '';
   const first = p.runs.find((r) => r.kind === 'text') as Extract<RunIR, { kind: 'text' }>;
   p.mark = { run: { ...first.run, letterSpacing: first.spacing !== undefined ? first.spacing / 15 : first.run.letterSpacing }, face: first.face };
   p.runs = [];
@@ -1155,8 +1158,7 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
     // dela (níveis acima vazios contam 1, como no Studio).
     const from = restart ? [] : ctx.clauses;
     const expected = [...Array.from({ length: clauseLevel }, (_, i) => from[i] || 1), (from[clauseLevel] ?? 0) + 1];
-    ctx.clauseFormats[clauseLevel] ??= format;
-    if (level >= CLAUSE_LEVELS || parts.join('.') !== expected.join('.') || ctx.clauseFormats[clauseLevel] !== format) {
+    if (level >= CLAUSE_LEVELS || parts.join('.') !== expected.join('.') || (ctx.clauseFormats[clauseLevel] ?? format) !== format) {
       // Número que a lista do Word não reproduz (override de anexo, recomeço
       // pelo meio, estilo diferente do que o nível já usa): vai como texto,
       // igual ao Studio, e a lista do Word não anda.
@@ -1167,6 +1169,8 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
       target.runs.unshift({ kind: 'text', text: node.autonumberText ?? node.autonumber, run, face });
       return out;
     }
+    // O estilo do nível só se fixa com um item aceito.
+    ctx.clauseFormats[clauseLevel] ??= format;
     if (restart) ctx.clauseInstance = ++ctx.instances;
     target.numbering = { ref: 'clauses', level: clauseLevel, instance: ctx.clauseInstance };
     ctx.clauses = parts;
