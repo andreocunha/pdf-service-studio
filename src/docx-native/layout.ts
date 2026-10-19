@@ -6,6 +6,9 @@ import { readFileSync } from 'node:fs';
 
 import { withRenderPage, type RenderMeta } from '../render.js';
 
+/** Formato do número do rodapé do Studio (`data-document-footer-format`). */
+export type FooterNumberFormat = 'page-total' | 'page' | 'page-of-total';
+
 export type Border = { w: number; color: string };
 export type Box = { x: number; y: number; w: number; h: number };
 export type Run = {
@@ -83,7 +86,7 @@ export type DocumentLayout = {
     bgColor: string | null;
     footer: {
       text: Extract<LayoutNode, { k: 'text' }> | null;
-      number: { text: string; box: Box; style: Omit<Run, 't' | 'br' | 'link'>; align: string } | null;
+      number: { text: string; format?: FooterNumberFormat; box: Box; style: Omit<Run, 't' | 'br' | 'link'>; align: string } | null;
     } | null;
     nav: { tree: LayoutNode; sig: string } | null;
   }[];

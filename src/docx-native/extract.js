@@ -392,7 +392,7 @@
         const numberEl = footerEl.querySelector('[data-document-footer-number]');
         footer = {
           text: textEl ? textLeaf(textEl, null) : null,
-          number: numberEl ? { text: numberEl.textContent.trim(), box: box(numberEl), style: runStyle(numberEl), align: getComputedStyle(numberEl).textAlign } : null,
+          number: numberEl ? { text: numberEl.textContent.trim(), format: numberEl.getAttribute('data-document-footer-format') || 'page-total', box: box(numberEl), style: runStyle(numberEl), align: getComputedStyle(numberEl).textAlign } : null,
         };
       }
       // Menu de seções: vai pro cabeçalho do Word; a assinatura (aba ativa

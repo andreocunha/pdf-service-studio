@@ -45,7 +45,7 @@ import {
 
 import type { Face } from '../docx-fonts.js';
 import type { FontResolver } from './fonts.js';
-import type { Box, DocumentLayout, LayoutNode, Para, Run } from './layout.js';
+import type { Box, DocumentLayout, FooterNumberFormat, LayoutNode, Para, Run } from './layout.js';
 
 // ---------------------------------------------------------------------------
 // Unidades
@@ -2240,6 +2240,7 @@ const toTable = (t: TIR): Table => {
 
 /** Marcador trocado depois (index.ts) pelos campos PAGE/NUMPAGES do Word. */
 export const PAGE_FIELD = '§LEXPAGE§';
+export type PageOffsets = { current: number; total: number; format: FooterNumberFormat };
 
 /**
  * Rodapé do Studio (texto + "02/28") → rodapé do Word: tabela sem borda com
@@ -2248,7 +2249,7 @@ export const PAGE_FIELD = '§LEXPAGE§';
 type BuiltFooter = {
   footer: Footer;
   distance: number;
-  offsets: { current: number; total: number } | null;
+  offsets: PageOffsets | null;
   atTop?: { blocks: () => (Paragraph | Table)[]; top: number };
 };
 
@@ -2258,8 +2259,9 @@ const buildFooter = (layout: DocumentLayout, pageIndex: number, pad: { left: num
   // Sem rodapé: parágrafo mínimo — um vazio no estilo Normal ocupava uma linha no pé da capa.
   if (!footer?.number) return { footer: new Footer({ children: [new Paragraph({ spacing: { before: 0, after: 0, line: 240, lineRule: LineRuleType.AUTO }, run: { size: 2 }, children: [] })] }), distance: 0, offsets: null };
   const num = footer.number;
-  const [current, total] = num.text.split('/').map((v) => Number(v));
-  const offsets = { current: current - (pageIndex + 1), total: total - layout.pages.length };
+  // "01/12", "1" ou "Página 1 de 12": o 1º número é a página, o 2º o total.
+  const [current = pageIndex + 1, total = layout.pages.length] = (num.text.match(/\d+/g) ?? []).map(Number);
+  const offsets: PageOffsets = { current: current - (pageIndex + 1), total: total - layout.pages.length, format: num.format ?? 'page-total' };
   const numFace = ctx.fonts.resolve(num.style.font, num.style.weight, num.style.italic);
   if (numFace) ctx.used.add(numFace);
   // Número com folga (o Word desenha "06/09" um pouco mais largo e quebrava).
@@ -2403,7 +2405,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   const coverBottom = new Map<number, number>();
   /** Bloco → onde vai o indicador dele se for destino de link (o título, senão o primeiro parágrafo). */
   const targets = new Map<string, PIR>();
-  let pageOffsets: { current: number; total: number } | null = null;
+  let pageOffsets: PageOffsets | null = null;
   // Onde o conteúdo anterior terminou. Atravessa a troca de seção contínua (só
   // a aba do menu mudou): o vão é o do Studio, não a distância do topo da página.
   let cursor: { page: number; y: number; slide: boolean } | null = null;

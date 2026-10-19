@@ -10,7 +10,7 @@ import type { Page } from 'puppeteer-core';
 import { getBrowser } from '../browser.js';
 import { embedFonts } from '../docx-fonts.js';
 import { withRenderPage } from '../render.js';
-import { buildDocument, PAGE_FIELD, type Assets } from './build.js';
+import { buildDocument, PAGE_FIELD, type Assets, type PageOffsets } from './build.js';
 import { loadFontResolver } from './fonts.js';
 import type { Box, DocumentLayout } from './layout.js';
 import { readFileSync } from 'node:fs';
@@ -131,11 +131,14 @@ const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData
  * Troca o marcador do rodapé pelos campos do Word: página atual e total, com
  * a mesma defasagem do Studio ("02/28" na terceira página) e dois dígitos.
  */
-const pageFields = (xml: string, offsets: { current: number; total: number } | null): string =>
+const pageFields = (xml: string, offsets: PageOffsets | null): string =>
   xml.replace(
     new RegExp(`<w:r>(<w:rPr>(?:(?!</w:r>).)*?</w:rPr>)?<w:t[^>]*>${PAGE_FIELD}</w:t></w:r>`, 'g'),
     (_, rPr = '') => {
       const run = (inner: string) => `<w:r>${rPr}${inner}</w:r>`;
+      // "01/12" leva zero à esquerda (como no Studio); "1" e "Página 1 de 12", não.
+      const padded = (offsets?.format ?? 'page-total') === 'page-total';
+      const pic = padded ? ' \\# "00"' : '';
       const field = (name: string, offset: number) => {
         const inner = offset
           ? [
@@ -146,12 +149,16 @@ const pageFields = (xml: string, offsets: { current: number; total: number } | n
               run('<w:fldChar w:fldCharType="separate"/>'),
               run('<w:t>1</w:t>'),
               run('<w:fldChar w:fldCharType="end"/>'),
-              run(`<w:instrText xml:space="preserve"> ${offset > 0 ? '+' : '-'} ${Math.abs(offset)} \\# "00" </w:instrText>`),
+              run(`<w:instrText xml:space="preserve"> ${offset > 0 ? '+' : '-'} ${Math.abs(offset)}${pic} </w:instrText>`),
             ]
-          : [run('<w:fldChar w:fldCharType="begin"/>'), run(`<w:instrText xml:space="preserve"> ${name} \\# "00" </w:instrText>`)];
-        return [...inner, run('<w:fldChar w:fldCharType="separate"/>'), run('<w:t>01</w:t>'), run('<w:fldChar w:fldCharType="end"/>')].join('');
+          : [run('<w:fldChar w:fldCharType="begin"/>'), run(`<w:instrText xml:space="preserve"> ${name}${pic} </w:instrText>`)];
+        return [...inner, run('<w:fldChar w:fldCharType="separate"/>'), run(`<w:t>${padded ? '01' : '1'}</w:t>`), run('<w:fldChar w:fldCharType="end"/>')].join('');
       };
-      return field('PAGE', offsets?.current ?? 0) + run('<w:t>/</w:t>') + field('NUMPAGES', offsets?.total ?? 0);
+      const page = field('PAGE', offsets?.current ?? 0);
+      const total = () => field('NUMPAGES', offsets?.total ?? 0);
+      if (offsets?.format === 'page') return page;
+      if (offsets?.format === 'page-of-total') return run('<w:t xml:space="preserve">Página </w:t>') + page + run('<w:t xml:space="preserve"> de </w:t>') + total();
+      return page + run('<w:t>/</w:t>') + total();
     },
   );
 
