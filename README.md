@@ -143,6 +143,26 @@ O script imprime a key pleno uma única vez — copie no ato. O banco guarda
 apenas o SHA-256. Para revogar, basta `UPDATE workspace_api_keys SET
 revoked_at = now() WHERE id = '<uuid>'`.
 
+## Word e PowerPoint nativos (`/docx`, `/pptx`)
+
+Os dois saem do layout real do Studio (a mesma página `/render-pdf` que vira
+PDF), sem passar pelo iLovePDF. Qualquer falha ou demora cai no iLovePDF.
+`DOCX_ENGINE=ilovepdf` / `PPTX_ENGINE=ilovepdf` voltam pro caminho antigo.
+
+- `src/office/`: o que é comum aos dois. Leitura do layout (`extract.js`,
+  `layout.ts`), imagens e capturas (`assets.ts`), fontes e espaçamento
+  (`fonts.ts`), fundo e numeração das páginas (`pages.ts`). Correção aqui vale
+  pros dois formatos.
+- `src/docx-native/`: Word no padrão da Lex (tabelas, nada flutuante,
+  numeração automática).
+- `src/pptx-native/`: uma página por slide, cada peça no mesmo lugar (caixa
+  de texto editável, forma, imagem). Fontes embutidas em EOT.
+
+Teste sem banco: `npm run build && node scripts/office-fixture/run.mjs /tmp/exemplo`
+gera `exemplo.docx` e `exemplo.pptx` da página de exemplo
+(`scripts/office-fixture/sample.html`; precisa do app local em :3000 pras fontes).
+Documento real: `npm run docx:native -- <id> saida.docx` / `npm run pptx:native -- <id> saida.pptx`.
+
 ## Fontes no Word (`/docx`)
 
 O iLovePDF monta o .docx com ótima fidelidade, mas troca as fontes do

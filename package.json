@@ -20,7 +20,8 @@
     "test:pdf-fidelity": "node --import tsx scripts/fidelity/audit.mts",
     "test:pdf-font-failures": "node --import tsx scripts/fidelity/test-font-failures.mts",
     "test:docx-fonts": "node --import tsx scripts/test-docx-fonts.mts",
-    "docx:native": "node --env-file=.env --import tsx scripts/docx-native.mts"
+    "docx:native": "node --env-file=.env --import tsx scripts/docx-native.mts",
+    "pptx:native": "node --env-file=.env --import tsx scripts/pptx-native.mts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

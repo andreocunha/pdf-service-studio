@@ -13,6 +13,7 @@ import { logger } from './logger.js';
 import { renderDocumentPdf } from './render.js';
 import { renderDocumentPreview } from './preview.js';
 import { renderNativeDocx } from './docx-native/index.js';
+import { renderNativePptx } from './pptx-native/index.js';
 import { finalizePdfDownload } from './pdf-download.js';
 import { serviceClient } from './supabase.js';
 
@@ -147,7 +148,7 @@ app.post<{ Body: PdfBody }>('/pdf', async (req, reply) => {
     .send(delivered);
 });
 
-// docx (Word) e pptx (PowerPoint) compartilham o mesmo fluxo via ilovepdf/pdfoffice.
+// docx (Word) e pptx (PowerPoint): nativo (src/docx-native, src/pptx-native) com o iLovePDF de reserva.
 const OFFICE_CONTENT_TYPE: Record<OfficeFormat, string> = {
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -160,8 +161,8 @@ const OFFICE_CONTENT_TYPE: Record<OfficeFormat, string> = {
  */
 const DOCX_FONTS_BUDGET_MS = 20_000;
 
-/** Tempo máximo do Word nativo antes de cair no iLovePDF. */
-const DOCX_NATIVE_BUDGET_MS = Number(process.env.DOCX_NATIVE_BUDGET_MS ?? 90_000);
+/** Tempo máximo do Word/PowerPoint nativo antes de cair no iLovePDF. */
+const OFFICE_NATIVE_BUDGET_MS = Number(process.env.OFFICE_NATIVE_BUDGET_MS ?? process.env.DOCX_NATIVE_BUDGET_MS ?? 90_000);
 
 const withRealFonts = async (docx: Buffer, pdf: Buffer, documentId: string): Promise<Buffer> => {
   const t0 = Date.now();
@@ -203,31 +204,32 @@ const handleOfficeExport = async (
     apiKey: typeof apiKey === 'string' ? apiKey : undefined,
   });
 
-  // Word nativo (padrão): montado do layout do Studio. Qualquer falha cai na
-  // conversão do iLovePDF abaixo — o download nunca fica sem arquivo.
-  if (format === 'docx' && config.docxEngine === 'native') {
+  // Word e PowerPoint nativos (padrão): montados do layout do Studio. Qualquer
+  // falha cai na conversão do iLovePDF abaixo — o download nunca fica sem arquivo.
+  if ((format === 'docx' ? config.docxEngine : config.pptxEngine) === 'native') {
     const t0 = Date.now();
     try {
       // Limite de tempo: passou disso, entrega o iLovePDF em vez de deixar o
       // usuário esperando (o nativo continua em segundo plano e é descartado).
       let timer: NodeJS.Timeout | undefined;
+      const render = format === 'docx' ? renderNativeDocx : renderNativePptx;
       const { buffer, title } = await Promise.race([
-        renderNativeDocx({ documentId: authed.documentId, workspaceId: authed.workspaceId, appUrl: config.renderBaseUrl }),
+        render({ documentId: authed.documentId, workspaceId: authed.workspaceId, appUrl: config.renderBaseUrl }),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`docx native timed out after ${DOCX_NATIVE_BUDGET_MS}ms`)), DOCX_NATIVE_BUDGET_MS);
+          timer = setTimeout(() => reject(new Error(`${format} native timed out after ${OFFICE_NATIVE_BUDGET_MS}ms`)), OFFICE_NATIVE_BUDGET_MS);
         }),
       ]).finally(() => clearTimeout(timer));
-      logger.info({ documentId: authed.documentId, elapsedMs: Date.now() - t0, bytes: buffer.length }, 'docx native');
+      logger.info({ documentId: authed.documentId, elapsedMs: Date.now() - t0, bytes: buffer.length }, `${format} native`);
       const clean = cleanTitle(title);
       reply
         .code(200)
-        .header('Content-Type', OFFICE_CONTENT_TYPE.docx)
-        .header('Content-Disposition', dispositionFor(clean, 'docx'))
+        .header('Content-Type', OFFICE_CONTENT_TYPE[format])
+        .header('Content-Disposition', dispositionFor(clean, format))
         .header('Cache-Control', 'no-store')
         .send(buffer);
       return;
     } catch (err) {
-      logger.warn({ documentId: authed.documentId, err, elapsedMs: Date.now() - t0 }, 'docx native failed — falling back to iLovePDF');
+      logger.warn({ documentId: authed.documentId, err, elapsedMs: Date.now() - t0 }, `${format} native failed — falling back to iLovePDF`);
     }
   }
 

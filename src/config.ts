@@ -28,6 +28,8 @@ export const config = {
    * 'ilovepdf': a conversão antiga do PDF. Voltar é só trocar a env.
    */
   docxEngine: optional('DOCX_ENGINE', 'native') as 'native' | 'ilovepdf',
+  /** Motor do PowerPoint (/pptx): igual ao do Word (src/pptx-native). `PPTX_ENGINE=ilovepdf` volta. */
+  pptxEngine: optional('PPTX_ENGINE', 'native') as 'native' | 'ilovepdf',
 } as const;
 
 export type Config = typeof config;
