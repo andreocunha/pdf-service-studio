@@ -192,10 +192,11 @@ export const renderNativePptx = async (args: { documentId: string; workspaceId: 
     const layout = await readLayout(page, meta);
     // Nitidez das capturas (ícones, gradientes): só a densidade muda, o layout não.
     await page.setViewport({ width: meta.pageWidthPx, height: meta.pageHeightPx, deviceScaleFactor: SCALE });
-    const assets = makeAssets(page);
+    const assets = makeAssets(page, args.signal);
     // Sem capa "em foto": no PowerPoint tudo fica no lugar, editável.
     const background = pageBackgrounds(page, layout, new Set(), assets);
     const deck = await buildDeck({ layout, fonts, assets, background });
+    args.signal?.throwIfAborted();
     const title = meta.title ?? 'document';
     return { buffer: await pack(deck, title, `${args.appUrl}/word-fonts/`), title };
   });

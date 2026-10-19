@@ -118,17 +118,28 @@
   };
 
   /**
-   * O que está atrás do elemento: a primeira cor de fundo opaca dos pais, ou
-   * null quando antes dela vem uma imagem/gradiente (cor desconhecida).
+   * O que está atrás do elemento: a primeira cor de fundo opaca dos pais
+   * (com os fundos translúcidos do caminho por cima dela), ou null quando
+   * antes dela vem uma imagem/gradiente (cor desconhecida).
    */
   const behind = (el, self = false) => {
+    const layers = [];
+    let base = [255, 255, 255];
     for (let e = self ? el : el.parentElement; e && e !== document.body; e = e.parentElement) {
       const cs = getComputedStyle(e);
       if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
       const m = rgbaOf(cs.backgroundColor);
-      if (m && (m[4] === undefined || Number(m[4]) >= 0.95)) return [m[1], m[2], m[3]].map(Number);
+      if (!m) continue;
+      const a = m[4] === undefined ? 1 : Number(m[4]);
+      const rgb = [m[1], m[2], m[3]].map(Number);
+      if (a >= 0.95) {
+        base = rgb;
+        break;
+      }
+      if (a > 0.02) layers.push([rgb, a]);
     }
-    return [255, 255, 255];
+    for (const [rgb, a] of layers.reverse()) base = base.map((b, i) => b + (rgb[i] - b) * a);
+    return base;
   };
 
   /**

@@ -5,7 +5,7 @@
  */
 import type { Page } from 'puppeteer-core';
 
-import { getBrowser } from '../browser.js';
+import { closeNow, getBrowser } from '../browser.js';
 import type { Box } from './layout.js';
 
 export type ImageData = { data: Buffer; type: 'png' | 'jpg' | 'gif' | 'bmp'; svg?: Buffer; aspect?: number };
@@ -43,9 +43,23 @@ const typeOf = (contentType: string, url: string): ImageData['type'] | 'svg' | n
 };
 
 /** SVG → PNG no próprio Chromium (fundo transparente), pro Word que não lê SVG. */
-const svgToPng = async (svg: Buffer, w: number, h: number): Promise<Buffer> => {
-  const browser = await getBrowser();
-  const page = await browser.newPage();
+/** Aba auxiliar que fecha na hora se a exportação for cancelada. */
+const helperTab = async (signal?: AbortSignal) => {
+  signal?.throwIfAborted();
+  const tab = await (await getBrowser()).newPage();
+  const onAbort = () => void closeNow(tab);
+  signal?.addEventListener('abort', onAbort, { once: true });
+  return {
+    tab,
+    close: async () => {
+      signal?.removeEventListener('abort', onAbort);
+      await tab.close().catch(() => undefined);
+    },
+  };
+};
+
+const svgToPng = async (svg: Buffer, w: number, h: number, signal?: AbortSignal): Promise<Buffer> => {
+  const { tab: page, close } = await helperTab(signal);
   try {
     await page.setViewport({ width: Math.ceil(w), height: Math.ceil(h), deviceScaleFactor: SCALE });
     const src = `data:image/svg+xml;base64,${svg.toString('base64')}`;
@@ -55,7 +69,7 @@ const svgToPng = async (svg: Buffer, w: number, h: number): Promise<Buffer> => {
     );
     return Buffer.from(await page.screenshot({ type: 'png', omitBackground: true, clip: { x: 0, y: 0, width: w, height: h } }));
   } finally {
-    await page.close().catch(() => undefined);
+    await close();
   }
 };
 
@@ -83,9 +97,9 @@ const rasterSize = (data: Buffer, type: string): { w: number; h: number } | null
  * para WebP — o fundo sumia no .docx). `cover` sai em JPEG (fundo opaco,
  * arquivo menor); `contain` em PNG (preserva transparência).
  */
-const redraw = async (data: Buffer, mime: string, w: number, h: number, fit: 'cover' | 'contain'): Promise<ImageData | null> => {
-  const browser = await getBrowser();
-  const tab = await browser.newPage();
+const redraw = async (data: Buffer, mime: string, w: number, h: number, fit: 'cover' | 'contain', signal?: AbortSignal): Promise<ImageData | null> => {
+  if (signal?.aborted) return null;
+  const { tab, close } = await helperTab(signal);
   try {
     await tab.setViewport({ width: Math.ceil(w), height: Math.ceil(h), deviceScaleFactor: SCALE });
     await tab.setContent(
@@ -102,11 +116,12 @@ const redraw = async (data: Buffer, mime: string, w: number, h: number, fit: 'co
   } catch {
     return null;
   } finally {
-    await tab.close().catch(() => undefined);
+    await close();
   }
 };
 
-export const makeAssets = (page: Page): Assets => {
+/** `signal`: exportação cancelada (prazo estourado) — nada novo começa, abas auxiliares fecham. */
+export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
   const cache = new Map<string, Promise<ImageData | null>>();
   // Um download por URL, mesmo com a imagem em vários tamanhos/usos.
   const downloads = new Map<string, Promise<{ data: Buffer; mime: string } | null>>();
@@ -115,7 +130,7 @@ export const makeAssets = (page: Page): Assets => {
     if (!hit) {
       hit = (async () => {
         try {
-          const res = await fetch(src, { signal: AbortSignal.timeout(15_000) });
+          const res = await fetch(src, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) });
           if (!res.ok) return null;
           return { data: Buffer.from(await res.arrayBuffer()), mime: (res.headers.get('content-type') ?? '').split(';')[0].trim() };
         } catch {
@@ -129,7 +144,7 @@ export const makeAssets = (page: Page): Assets => {
   const cached = (key: string, make: () => Promise<ImageData | null>) => {
     let hit = cache.get(key);
     if (!hit) {
-      hit = make().catch(() => null);
+      hit = signal?.aborted ? Promise.resolve(null) : make().catch(() => null);
       cache.set(key, hit);
     }
     return hit;
@@ -140,10 +155,10 @@ export const makeAssets = (page: Page): Assets => {
       if (!got) return null;
       const type = typeOf(got.mime, src);
       // O navegador desenha o SVG sem distorcer (preserveAspectRatio); o Word estica até a caixa.
-      if (type === 'svg') return { svg: got.data, data: await svgToPng(got.data, w, h), type: 'png', aspect: svgAspect(got.data) };
+      if (type === 'svg') return { svg: got.data, data: await svgToPng(got.data, w, h, signal), type: 'png', aspect: svgAspect(got.data) };
       if (type) return { data: got.data, type };
       // WebP e afins: o Word não lê — vai como PNG desenhado pelo Chromium.
-      return /^image\//.test(got.mime) ? redraw(got.data, got.mime, w, h, 'contain') : null;
+      return /^image\//.test(got.mime) ? redraw(got.data, got.mime, w, h, 'contain', signal) : null;
     });
   /** Fundo de página raster: recorte "cover" como no Studio. PNG/JPEG que já
    *  têm a proporção da página vão como estão (sem reamostrar). */
@@ -159,7 +174,7 @@ export const makeAssets = (page: Page): Assets => {
         const size = rasterSize(got.data, type);
         if (size && Math.abs(size.w / size.h - w / h) <= 0.02 * (w / h)) return { data: got.data, type };
       }
-      return /^image\//.test(got.mime) ? redraw(got.data, got.mime, w, h, 'cover') : null;
+      return /^image\//.test(got.mime) ? redraw(got.data, got.mime, w, h, 'cover', signal) : null;
     });
   /**
    * Captura só o elemento, com fundo transparente: o resto da página some
@@ -169,6 +184,7 @@ export const makeAssets = (page: Page): Assets => {
    * (bloco complexo — o texto vai editável por cima da captura).
    */
   const capture = async (id: number, mode: 'all' | 'alone' | 'notext', clip?: Box): Promise<ImageData | null> => {
+    if (signal?.aborted) return null;
     const alone = mode === 'alone';
     const el = await page.$(`[data-dx="${id}"]`);
     if (!el) return null;
@@ -186,6 +202,13 @@ export const makeAssets = (page: Page): Assets => {
         style.textContent = '[data-dx-text], [data-dx-text] * { color: transparent !important; -webkit-text-fill-color: transparent !important; text-decoration-color: transparent !important; text-shadow: none !important; }';
         document.head.appendChild(style);
       }
+      if (${alone}) {
+        // Só a pintura: texto solto direto dentro da caixa também some (ele vai editável por cima).
+        const style = document.createElement('style');
+        style.id = 'dx-alone';
+        style.textContent = '[data-dx="${id}"] { color: transparent !important; -webkit-text-fill-color: transparent !important; text-decoration-color: transparent !important; text-shadow: none !important; }';
+        document.head.appendChild(style);
+      }
     })()`);
     try {
       const data = Buffer.from(
@@ -199,6 +222,7 @@ export const makeAssets = (page: Page): Assets => {
         for (const e of document.querySelectorAll('[data-dx-vis]')) { e.style.visibility = e.getAttribute('data-dx-vis'); e.removeAttribute('data-dx-vis'); }
         for (const e of [document.documentElement, document.body]) { e.style.removeProperty('background'); e.style.background = e.getAttribute('data-dx-bg') || ''; e.removeAttribute('data-dx-bg'); }
         document.getElementById('dx-notext')?.remove();
+        document.getElementById('dx-alone')?.remove();
       })()`);
     }
   };

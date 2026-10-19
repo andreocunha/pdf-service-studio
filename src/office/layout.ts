@@ -164,6 +164,12 @@ export const withoutGlass = (layout: DocumentLayout): DocumentLayout => {
     if (n.k !== 'box') return n;
     const kids = n.kids.map(strip).filter((k): k is LayoutNode => k !== null);
     if (n.glass && kids.length === 1 && kids[0].k === 'text') return { ...kids[0], abs: n.abs };
+    // Ficou vazia: a regra do extrator pra caixa sem filhos (forma, se pinta algo; senão some).
+    if (!kids.length && n.kids.length) {
+      if (!n.fill && !n.border && !n.bgImage) return null;
+      const { kids: _kids, layout: _layout, ...deco } = n;
+      return { ...deco, k: 'shape' };
+    }
     return { ...n, kids };
   };
   return {

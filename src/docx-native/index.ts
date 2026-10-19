@@ -55,12 +55,13 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
     const layout = withoutGlass(await readLayout(page, meta));
     // Nitidez das capturas (capa, ícones): só a densidade muda, o layout não.
     await page.setViewport({ width: meta.pageWidthPx, height: meta.pageHeightPx, deviceScaleFactor: SCALE });
-    const assets = makeAssets(page);
+    const assets = makeAssets(page, args.signal);
     const covers = coverPagesOf(layout);
 
     const background = pageBackgrounds(page, layout, covers, assets);
 
     const { doc, used, pageOffsets } = await buildDocument({ layout, fonts, assets, background, coverPages: covers });
+    args.signal?.throwIfAborted();
     const packed = await Packer.toBuffer(doc);
     const files = unzipSync(new Uint8Array(packed)) as Zippable;
     for (const path of Object.keys(files).filter((p) => /^word\/(header|footer)\d+\.xml$/.test(p))) {

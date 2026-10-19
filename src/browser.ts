@@ -1,4 +1,4 @@
-import type { Browser } from 'puppeteer-core';
+import type { Browser, Page } from 'puppeteer-core';
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
 
@@ -85,5 +85,23 @@ export const closeBrowser = async (): Promise<void> => {
     logger.warn({ err }, 'Error closing browser');
   } finally {
     browserPromise = null;
+  }
+};
+
+/**
+ * Fecha a aba na hora, pelo protocolo: o `page.close()` do Puppeteer espera
+ * as capturas de tela em andamento terminarem (e o `newPage()` de outra
+ * exportação espera o mesmo), então cancelar no meio de uma captura travava.
+ */
+export const closeNow = async (page: Page): Promise<void> => {
+  try {
+    const own = await page.createCDPSession();
+    const { targetInfo } = await own.send('Target.getTargetInfo');
+    await own.detach().catch(() => undefined);
+    const root = await page.browser().target().createCDPSession();
+    await root.send('Target.closeTarget', { targetId: targetInfo.targetId });
+    await root.detach().catch(() => undefined);
+  } catch {
+    await page.close().catch(() => undefined);
   }
 };

@@ -1,6 +1,6 @@
 import { TimeoutError, type Page } from 'puppeteer-core';
 
-import { getBrowser } from './browser.js';
+import { closeNow, getBrowser } from './browser.js';
 import { config } from './config.js';
 import { HttpError, renderFailed } from './errors.js';
 import { logger } from './logger.js';
@@ -75,7 +75,7 @@ export const withRenderPage = async <T>(
   const page = await browser.newPage();
   // Cancelado (o Word/PowerPoint nativo estourou o prazo): fecha a página —
   // o que estiver rodando nela falha e para, em vez de seguir em segundo plano.
-  const onAbort = () => void page.close().catch(() => undefined);
+  const onAbort = () => void closeNow(page);
   args.signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
