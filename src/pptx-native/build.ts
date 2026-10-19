@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 
 import type { Assets, ImageData } from '../office/assets.js';
 import { fitLetterSpacing, type Face, type FontResolver } from '../office/fonts.js';
-import { isOneLine, type Box, type DocumentLayout, type LayoutNode, type Para, type Run } from '../office/layout.js';
+import { isOneLine, type Border, type Box, type DocumentLayout, type LayoutNode, type Para, type Run, type Shadow, type Tint } from '../office/layout.js';
 import { pageNumbering } from '../office/pages.js';
 
 // ---------------------------------------------------------------------------
@@ -39,7 +39,34 @@ const attrs = (a: Record<string, string | number | undefined | false>) =>
     .map(([k, v]) => ` ${k}="${typeof v === 'string' ? esc(v) : v}"`)
     .join('');
 
-const solid = (hex: string) => `<a:solidFill><a:srgbClr val="${hex.toUpperCase()}"/></a:solidFill>`;
+/** Cor, com transparência quando tem (alfa de 0 a 1). */
+const clr = (hex: string, alpha?: number) =>
+  alpha !== undefined && alpha < 0.995
+    ? `<a:srgbClr val="${hex.toUpperCase()}"><a:alpha val="${Math.round(alpha * 100000)}"/></a:srgbClr>`
+    : `<a:srgbClr val="${hex.toUpperCase()}"/>`;
+const solid = (hex: string, alpha?: number) => `<a:solidFill>${clr(hex, alpha)}</a:solidFill>`;
+const fillOf = (f: string | Tint) => (typeof f === 'string' ? solid(f) : solid(f.color, f.alpha));
+
+/** Tracejado do CSS (o Chromium desenha traço e vão de ~3× a espessura). */
+const dashOf = (style?: Border['style']) =>
+  style === 'dashed' ? '<a:custDash><a:ds d="300000" sp="300000"/></a:custDash>' : style === 'dotted' ? '<a:prstDash val="sysDot"/>' : '';
+const lineXml = (b: Border) => `<a:ln w="${emu(b.w)}"${b.style === 'dotted' ? ' cap="rnd"' : ''}>${b.raw ? solid(b.raw.color, b.raw.alpha) : solid(b.color)}${dashOf(b.style)}</a:ln>`;
+
+/**
+ * Sombra suave do CSS → sombra do PowerPoint (só cabe uma): o desfoque da
+ * maior, as transparências somadas (o CSS empilha uma curta e uma longa).
+ */
+const shadowXml = (list: Shadow[] | undefined, b: Box): string => {
+  const soft = (list ?? []).filter((s) => s.blur > 0);
+  if (!soft.length) return '';
+  const main = soft.reduce((a, c) => (c.blur > a.blur ? c : a));
+  const alpha = Math.min(0.6, soft.reduce((sum, c) => sum + c.alpha, 0));
+  const dist = Math.hypot(main.x, main.y);
+  const dir = dist ? Math.round((((Math.atan2(main.y, main.x) * 180) / Math.PI + 360) % 360) * 60000) : 0;
+  const sx = main.spread && b.w ? Math.round(((b.w + 2 * main.spread) / b.w) * 100000) : undefined;
+  const sy = main.spread && b.h ? Math.round(((b.h + 2 * main.spread) / b.h) * 100000) : undefined;
+  return `<a:effectLst><a:outerShdw${attrs({ blurRad: emu(main.blur), dist: emu(dist), dir, sx, sy, algn: 'ctr', rotWithShape: 0 })}>${clr(main.color, alpha)}</a:outerShdw></a:effectLst>`;
+};
 
 // ---------------------------------------------------------------------------
 // Saída
@@ -67,6 +94,9 @@ export type BuildInput = {
   background: (pageIndex: number) => Promise<ImageData | null>;
 };
 
+/** Trecho já cortado onde a linha quebrava no Studio. */
+type PRun = Run & { wrap?: boolean; spc?: number };
+
 /**
  * Espaços como o navegador mostra: em sequência viram um, e no começo/fim do
  * parágrafo somem (com white-space normal). Parágrafo só de espaço (o vão
@@ -75,7 +105,7 @@ export type BuildInput = {
 const visibleParas = (paras: Para[], numbered = false): Para[] =>
   paras
     .map((p, pi) => {
-      const runs = p.runs.map((r) => (r.t && r.collapse ? { ...r, t: r.t.replace(/[ \t\r\f]+/g, ' ') } : { ...r }));
+      const runs: PRun[] = p.runs.map((r) => (r.t && r.collapse ? { ...r, t: r.t.replace(/[ \t\r\f]+/g, ' ') } : { ...r }));
       // Depois do número da cláusula o espaço fica (é ele que separa "2.1" do texto).
       let atStart = !(numbered && pi === 0);
       for (const [i, r] of runs.entries()) {
@@ -84,9 +114,10 @@ const visibleParas = (paras: Para[], numbered = false): Para[] =>
           continue;
         }
         if (!r.t) continue;
+        if (r.wrap) atStart = true;
         if (r.collapse && atStart) r.t = r.t.replace(/^ +/, '');
         const next = runs.slice(i + 1).find((x) => x.br || x.t);
-        if (r.collapse && (!next || next.br)) r.t = r.t.replace(/ +$/, '');
+        if (r.collapse && (!next || next.br || next.wrap)) r.t = r.t.replace(/ +$/, '');
         if (r.collapse && next?.t && next.collapse && r.t.endsWith(' ')) next.t = next.t.replace(/^ +/, '');
         if (r.t) atStart = false;
       }
@@ -200,12 +231,22 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
       return `<a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val ${adj}"/></a:avLst></a:prstGeom>`;
     };
 
-    const rect = (b: Box, fill: string | null, line?: { w: number; color: string }, radius?: number, name = 'Forma') => {
+    const rect = (b: Box, fill: string | Tint | null, line?: Border, radius?: number, name = 'Forma', effects = '') => {
       const id = nextId++;
-      const ln = line ? `<a:ln w="${emu(line.w)}">${solid(line.color)}</a:ln>` : '<a:ln><a:noFill/></a:ln>';
+      const ln = line ? lineXml(line) : '<a:ln><a:noFill/></a:ln>';
       shapes.push(
         `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${name} ${id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>` +
-          `<p:spPr>${xfrm(b)}${geometry(b, radius)}${fill ? solid(fill) : '<a:noFill/>'}${ln}</p:spPr></p:sp>`,
+          `<p:spPr>${xfrm(b)}${geometry(b, radius)}${fill ? fillOf(fill) : '<a:noFill/>'}${ln}${effects}</p:spPr></p:sp>`,
+      );
+    };
+
+    /** Linha reta (borda tracejada de um lado só). */
+    const line = (x1: number, y1: number, x2: number, y2: number, border: Border) => {
+      const id = nextId++;
+      const b = { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+      shapes.push(
+        `<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="${id}" name="Linha ${id}"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>` +
+          `<p:spPr>${xfrm(b)}<a:prstGeom prst="line"><a:avLst/></a:prstGeom>${lineXml(border)}</p:spPr></p:cxnSp>`,
       );
     };
 
@@ -217,21 +258,65 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
       }
       const sides = n.border ?? {};
       const list = (['top', 'right', 'bottom', 'left'] as const).map((s) => sides[s]);
-      const uniform = list.every((s) => s && s.w === list[0]!.w && s.color === list[0]!.color);
-      if (!n.fill && !list.some(Boolean)) return;
-      if (uniform) {
+      const fill = n.fill ? n.fillRaw ?? n.fill : null;
+      if (!fill && !list.some(Boolean)) return;
+      // Sombra sem desfoque (anel "0 0 0 6px" em volta do ícone): forma maior atrás, na cor dela.
+      for (const s of n.shadow ?? []) {
+        if (s.blur > 0 || (!s.spread && !s.x && !s.y)) continue;
+        const b = { x: n.box.x + s.x - s.spread, y: n.box.y + s.y - s.spread, w: n.box.w + 2 * s.spread, h: n.box.h + 2 * s.spread };
+        rect(b, { color: s.color, alpha: s.alpha }, undefined, n.radius ? n.radius + s.spread : undefined, 'Contorno');
+      }
+      const effects = fill ? shadowXml(n.shadow, n.box) : '';
+      const same = (a?: Border, b?: Border) => a && b && a.w === b.w && a.color === b.color && a.style === b.style && a.raw?.alpha === b.raw?.alpha;
+      if (list.every((s) => same(s, list[0]))) {
         // A borda do CSS fica por dentro da caixa; a do PowerPoint, centrada na linha.
         const w = list[0]!.w;
         const b = { x: n.box.x + w / 2, y: n.box.y + w / 2, w: n.box.w - w, h: n.box.h - w };
-        return rect(b, n.fill ?? null, list[0], n.radius ? Math.max(0, n.radius - w / 2) : undefined);
+        return rect(b, fill, list[0], n.radius ? Math.max(0, n.radius - w / 2) : undefined, 'Forma', effects);
       }
-      if (n.fill) rect(n.box, n.fill, undefined, n.radius);
-      // Bordas soltas (divisória embaixo do título): uma barra por lado.
+      // Borda grossa de um lado só num card arredondado (faixa de destaque à
+      // esquerda): em camadas, pra faixa acompanhar a curva como no Studio —
+      // a cor da faixa no card inteiro, o card deslocado por cima.
+      const names = ['top', 'right', 'bottom', 'left'] as const;
+      const thick = names.filter((k) => sides[k] && !sides[k]!.style);
+      const accent = thick.length ? thick.reduce((a, k) => (sides[k]!.w > sides[a]!.w ? k : a)) : null;
+      const others = names.filter((k) => k !== accent && sides[k]);
+      const thin = others.length ? sides[others[0]]! : undefined;
+      if (
+        accent && n.radius && n.radius >= 4 && n.fill && sides[accent]!.w >= 2 &&
+        others.every((k) => same(sides[k], thin) && sides[k]!.w < sides[accent]!.w)
+      ) {
+        const a = sides[accent]!;
+        const inset = (b: Box, d: Partial<Record<(typeof names)[number], number>>): Box => ({
+          x: b.x + (d.left ?? 0),
+          y: b.y + (d.top ?? 0),
+          w: b.w - (d.left ?? 0) - (d.right ?? 0),
+          h: b.h - (d.top ?? 0) - (d.bottom ?? 0),
+        });
+        rect(n.box, a.raw ?? a.color, undefined, n.radius, 'Forma', effects);
+        const card = inset(n.box, { [accent]: a.w });
+        // Por cima da faixa, só cor opaca (a transparente deixaria a faixa aparecer).
+        if (thin && others.length === 3) {
+          rect(card, thin.color, undefined, n.radius, 'Borda');
+          const w = thin.w;
+          const inner = inset(card, Object.fromEntries(names.filter((k) => k !== accent).map((k) => [k, w])));
+          return rect(inner, n.fill, undefined, Math.max(0, n.radius - w), 'Forma');
+        }
+        return rect(card, n.fill, undefined, n.radius, 'Forma');
+      }
+      if (fill) rect(n.box, fill, undefined, n.radius, 'Forma', effects);
+      // Bordas soltas (divisória embaixo do título, linha do tempo tracejada): uma por lado.
       const { x, y, w, h } = n.box;
-      if (sides.top) rect({ x, y, w, h: sides.top.w }, sides.top.color, undefined, undefined, 'Linha');
-      if (sides.bottom) rect({ x, y: y + h - sides.bottom.w, w, h: sides.bottom.w }, sides.bottom.color, undefined, undefined, 'Linha');
-      if (sides.left) rect({ x, y, w: sides.left.w, h }, sides.left.color, undefined, undefined, 'Linha');
-      if (sides.right) rect({ x: x + w - sides.right.w, y, w: sides.right.w, h }, sides.right.color, undefined, undefined, 'Linha');
+      const side = (border: Border | undefined, bar: Box, from: [number, number], to: [number, number]) => {
+        if (!border) return;
+        if (border.style) return line(from[0], from[1], to[0], to[1], border);
+        rect(bar, border.raw ?? border.color, undefined, undefined, 'Linha');
+      };
+      const { top, bottom, left, right } = sides;
+      if (top) side(top, { x, y, w, h: top.w }, [x, y + top.w / 2], [x + w, y + top.w / 2]);
+      if (bottom) side(bottom, { x, y: y + h - bottom.w, w, h: bottom.w }, [x, y + h - bottom.w / 2], [x + w, y + h - bottom.w / 2]);
+      if (left) side(left, { x, y, w: left.w, h }, [x + left.w / 2, y], [x + left.w / 2, y + h]);
+      if (right) side(right, { x: x + w - right.w, y, w: right.w, h }, [x + w - right.w / 2, y], [x + w - right.w / 2, y + h]);
     };
 
     // --- texto ------------------------------------------------------------
@@ -253,7 +338,7 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
           baseline: r.verticalAlign === 'super' ? 30000 : r.verticalAlign === 'sub' ? -25000 : undefined,
           dirty: 0,
         })}>` +
-        solid(r.color) +
+        solid(r.color, r.alpha) +
         (r.highlight ? `<a:highlight><a:srgbClr val="${r.highlight.toUpperCase()}"/></a:highlight>` : '') +
         `<a:latin typeface="${typeface}"/><a:ea typeface="${typeface}"/><a:cs typeface="${typeface}"/>` +
         linkXml(r.link) +
@@ -263,9 +348,9 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
     };
 
     /** Trecho de texto com o espaçamento que dá a largura do Studio. */
-    const textRun = (r: Run, justified = false) => {
+    const textRun = (r: PRun, justified = false) => {
       const face = faceOf(r, r.t?.length ?? 0);
-      return runXml(r, r.t ?? '', face, fitLetterSpacing(r, face, fonts.data, r.size, justified));
+      return runXml(r, r.t ?? '', face, r.spc ?? fitLetterSpacing(r, face, fonts.data, r.size, justified));
     };
 
     const BULLET: Record<string, string> = {
@@ -282,13 +367,23 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
         const gap = (para.indent ?? 0) >= 4 ? para.indent! : para.fontSize * 1.1;
         const marL = para.x !== undefined ? para.x - left : gap;
         indent = { marL: emu(Math.max(0, marL)), indent: -emu(Math.min(gap, Math.max(0, marL))), lvl: Math.min(8, para.list.level) };
-        list = para.list.kind === 'bullet' ? '<a:buFont typeface="Arial"/><a:buChar char="•"/>' : `<a:buAutoNum type="${BULLET[para.list.kind] ?? 'arabicPeriod'}"/>`;
+        // Marcador na cor, no tamanho e na fonte do Studio (o "•" do Chromium vem da fonte do texto).
+        const first = para.runs.find((r) => r.t);
+        const mk = para.marker;
+        const look =
+          (mk ? `<a:buClr>${clr(mk.color, mk.alpha)}</a:buClr>` : '') +
+          (mk?.size && first ? `<a:buSzPct val="${Math.round(Math.min(4, Math.max(0.25, mk.size / first.size)) * 100000)}"/>` : '');
+        const font = first ? esc(faceOf(first)?.family ?? first.font) : 'Arial';
+        list =
+          para.list.kind === 'bullet'
+            ? `${look}<a:buFont typeface="${font}"/><a:buChar char="•"/>`
+            : `${look}<a:buFont typeface="${font}"/><a:buAutoNum type="${BULLET[para.list.kind] ?? 'arabicPeriod'}"/>`;
       }
       const lnSpc = para.lineHeight
         ? `<a:lnSpc><a:spcPts val="${pt100(para.lineHeight)}"/></a:lnSpc>`
         : '<a:lnSpc><a:spcPct val="100000"/></a:lnSpc>';
-      const runs = para.runs
-        .map((r) => (r.br ? '<a:br><a:rPr lang="pt-BR" dirty="0"/></a:br>' : r.t ? textRun(r, para.align === 'both') : ''))
+      const runs = (para.runs as PRun[])
+        .map((r) => (r.br ? '<a:br><a:rPr lang="pt-BR" dirty="0"/></a:br>' : r.t ? (r.wrap ? `<a:br>${breakProps(r)}</a:br>` : '') + textRun(r, para.align === 'both') : ''))
         .join('');
       const first = para.runs.find((r) => r.t);
       const end = first
@@ -296,6 +391,30 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
         : `<a:endParaRPr lang="pt-BR" sz="${Math.max(100, pt100(para.fontSize))}" dirty="0"/>`;
       return `<a:p><a:pPr${attrs({ ...indent, algn })}>${lnSpc}<a:spcBef><a:spcPts val="${pt100(before)}"/></a:spcBef><a:spcAft><a:spcPts val="0"/></a:spcAft>${list}</a:pPr>${prefix}${runs}${end}</a:p>`;
     };
+
+    /** Quebra no lugar onde o Studio quebrou: com o tamanho do texto (senão a linha vazia teria 18pt). */
+    const breakProps = (r: Run) => `<a:rPr lang="pt-BR" sz="${Math.max(100, pt100(r.size))}" dirty="0"/>`;
+
+    /**
+     * Corta os trechos onde a linha quebrava no Studio: o PowerPoint mede um
+     * tiquinho diferente e quebraria em outro lugar ("Onde nasce o aroma"
+     * numa linha só). O espaçamento é o do trecho inteiro. Justificado fica
+     * de fora (a linha antes da quebra não esticaria).
+     */
+    const atStudioBreaks = (paras: Para[]): Para[] =>
+      paras.map((p) =>
+        p.align === 'both'
+          ? p
+          : {
+              ...p,
+              runs: p.runs.flatMap((r): PRun[] => {
+                if (!r.t || !r.breaks?.length) return [r];
+                const spc = fitLetterSpacing(r, fonts.resolve(r.font, r.weight, r.italic), fonts.data, r.size);
+                const cuts = [...new Set([0, ...r.breaks.filter((i) => i > 0 && i < r.t!.length), r.t.length])];
+                return cuts.slice(0, -1).map((a, k) => ({ ...r, t: r.t!.slice(a, cuts[k + 1]), spc, breaks: undefined, wrap: k > 0 || r.breaks![0] === 0 }));
+              }),
+            },
+      );
 
     const textBox = (b: Box, body: string, opts: { wrap: boolean; middle?: boolean; link?: string | null; name?: string }) => {
       const id = nextId++;
@@ -307,7 +426,8 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
     };
 
     const text = (node: Extract<LayoutNode, { k: 'text' }>) => {
-      const n = { ...node, paras: visibleParas(node.paras, Boolean(node.autonumber && node.autonumberStyle)) };
+      const n = { ...node, paras: visibleParas(atStudioBreaks(node.paras), Boolean(node.autonumber && node.autonumberStyle)) };
+      const wrapped = n.paras.some((p) => (p.runs as PRun[]).some((r) => r.wrap));
       const hasRuns = n.paras.length > 0;
       const number = n.autonumber ? n.autonumberText ?? n.autonumber : null;
       const style = n.autonumberStyle;
@@ -340,8 +460,9 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
         // Uma linha: nunca quebra (o PowerPoint mede um tiquinho diferente); a caixa ancora o alinhamento.
         if (n.inkRight != null && align === 'left') b = { ...b, w: Math.max(b.w, n.inkRight - b.x) };
       } else {
-        // Várias linhas: folga mínima pra a quebra cair no mesmo lugar.
-        const slack = 2;
+        // Várias linhas: folga mínima pra a quebra cair no mesmo lugar; com a
+        // quebra do Studio marcada, folga maior (a linha nunca quebra de novo).
+        const slack = wrapped ? Math.max(2, b.w * 0.04) : 2;
         b = align === 'center' ? { ...b, x: b.x - slack / 2, w: b.w + slack } : align === 'right' ? { ...b, x: b.x - slack, w: b.w + slack } : { ...b, w: b.w + slack };
       }
       const links = new Set(n.paras.flatMap((p) => p.runs.filter((r) => r.t?.trim()).map((r) => r.link ?? '')));
@@ -354,6 +475,11 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
         const gap = i === 0 ? (n.middle ? 0 : p.first - n.box.y - lh(p) / 2) : prev?.last !== undefined ? p.first - prev.last - (lh(prev) + lh(p)) / 2 : 0;
         return gap > 0.5 ? gap : 0;
       };
+      // Entrelinha menor que a altura da fonte ("80+" com line-height 1): o
+      // PowerPoint sobe o texto — medido: ~metade da diferença, menos 1px.
+      const p0 = n.paras[0];
+      const lift = !n.middle && p0?.area ? 0.49 * (p0.area - lh(p0)) - 1 : 0;
+      if (lift > 0.5) b = { ...b, y: b.y + lift };
       const body = n.paras.map((p, i) => paragraph(p, b.x, i === 0 ? prefix : '', before(p, i))).join('');
       textBox(b, body, { wrap: !oneLine, middle: n.middle, link });
     };
@@ -362,6 +488,11 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
 
     const walk = async (n: LayoutNode, parent?: Extract<LayoutNode, { k: 'box' }>): Promise<void> => {
       if (n.k === 'text') return text(n);
+      // Passa da borda de um card que recorta: só o pedaço visível, capturado.
+      if ((n.k === 'img' || n.k === 'raster') && n.clip) {
+        const img = await assets.raster(n.id, n.clip);
+        return img ? picture(img, n.clip) : undefined;
+      }
       if (n.k === 'img') {
         const img = await assets.image(n.src, n.box.w, n.box.h);
         if (!img) return;

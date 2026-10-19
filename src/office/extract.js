@@ -32,10 +32,57 @@
   const visible = (el, cs) =>
     cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.01 && !el.hasAttribute('data-editor-only');
 
+  /**
+   * Cor do CSS como [_, r, g, b, alfa?] (strings, como o match do rgba()).
+   * O Tailwind 4 escreve cores em lab()/oklch(), e o getComputedStyle devolve
+   * assim mesmo: o canvas converte pra sRGB (o cinza do marcador saía preto).
+   */
+  const RGBA = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/;
+  const colorCache = new Map();
+  let paintCtx = null;
+  const rgbaOf = (c) => {
+    if (!c) return null;
+    const m = c.match(RGBA);
+    if (m) return m;
+    if (colorCache.has(c)) return colorCache.get(c);
+    let out = null;
+    if (/^(lab|lch|oklab|oklch|hsla?|hwb|color)\(/.test(c)) {
+      const a = c.match(/\/\s*([\d.]+)(%?)\s*\)$/);
+      const alpha = a ? Number(a[1]) / (a[2] ? 100 : 1) : 1;
+      if (!paintCtx) {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 1;
+        paintCtx = canvas.getContext('2d', { willReadFrequently: true });
+      }
+      paintCtx.clearRect(0, 0, 1, 1);
+      paintCtx.fillStyle = '#000';
+      paintCtx.fillStyle = c.replace(/\s*\/\s*[\d.]+%?\s*\)$/, ')');
+      paintCtx.fillRect(0, 0, 1, 1);
+      const [r, g, b] = paintCtx.getImageData(0, 0, 1, 1).data;
+      out = [c, String(r), String(g), String(b), alpha < 1 ? String(alpha) : undefined];
+    }
+    colorCache.set(c, out);
+    return out;
+  };
+
   const color = (c) => {
-    const m = c && c.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/);
+    const m = c && rgbaOf(c);
     if (!m || (m[4] !== undefined && Number(m[4]) < 0.05)) return null;
     return [m[1], m[2], m[3]].map((v) => Number(v).toString(16).padStart(2, '0')).join('');
+  };
+
+  /**
+   * Cor com a transparência de verdade (rgba × opacity do elemento e dos
+   * pais): o PowerPoint tem alfa — a mistura com o que está atrás (blend)
+   * fica pro Word. Só quando é transparente.
+   */
+  const translucent = (el, c) => {
+    const m = c && rgbaOf(c);
+    if (!m) return undefined;
+    let alpha = m[4] === undefined ? 1 : Number(m[4]);
+    for (let e = el; e && e !== document.body; e = e.parentElement) alpha *= Number(getComputedStyle(e).opacity);
+    if (alpha >= 0.98 || alpha < 0.02) return undefined;
+    return { color: [m[1], m[2], m[3]].map((v) => Math.round(Number(v)).toString(16).padStart(2, '0')).join(''), alpha: Math.round(alpha * 1000) / 1000 };
   };
 
   const border = (el, cs, side) => {
@@ -43,7 +90,31 @@
     const style = cs[`border${side}Style`];
     if (!w || style === 'none' || style === 'hidden') return null;
     const c = blend(el, cs[`border${side}Color`], true);
-    return c ? { w, color: c } : null;
+    if (!c) return null;
+    const b = { w, color: c };
+    const raw = translucent(el, cs[`border${side}Color`]);
+    if (raw) b.raw = raw;
+    if (style === 'dashed' || style === 'dotted') b.style = style;
+    return b;
+  };
+
+  /** box-shadow por fora (o de dentro, "inset", é brilho de 1px — fica de fora). */
+  const shadows = (el, cs) => {
+    if (!cs.boxShadow || cs.boxShadow === 'none') return undefined;
+    const list = cs.boxShadow
+      .split(/,(?![^(]*\))/)
+      .map((s) => s.trim())
+      .filter((s) => !/\binset\b/.test(s))
+      .map((s) => {
+        const c = s.match(/(?:rgba?|lab|lch|oklab|oklch|hsla?|hwb|color)\([^)]*\)/);
+        const nums = s.replace(/(?:rgba?|lab|lch|oklab|oklch|hsla?|hwb|color)\([^)]*\)/, '').trim().split(/\s+/).map(parseFloat);
+        const raw = c && (translucent(el, c[0]) || { color: color(c[0]), alpha: 1 });
+        if (!raw || !raw.color) return null;
+        const [x = 0, y = 0, blur = 0, spread = 0] = nums;
+        return { x, y, blur, spread, color: raw.color, alpha: raw.alpha };
+      })
+      .filter(Boolean);
+    return list.length ? list : undefined;
   };
 
   /**
@@ -54,7 +125,7 @@
     for (let e = el.parentElement; e && e !== document.body; e = e.parentElement) {
       const cs = getComputedStyle(e);
       if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
-      const m = cs.backgroundColor.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/);
+      const m = rgbaOf(cs.backgroundColor);
       if (m && (m[4] === undefined || Number(m[4]) >= 0.95)) return [m[1], m[2], m[3]].map(Number);
     }
     return [255, 255, 255];
@@ -68,7 +139,7 @@
    * claro), e a borda dele fica na cor cheia — é o contorno do quadro.
    */
   const blend = (el, c, line = false) => {
-    const m = c && c.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/);
+    const m = c && rgbaOf(c);
     if (!m) return null;
     let alpha = m[4] === undefined ? 1 : Number(m[4]);
     for (let e = el; e && e !== document.body; e = e.parentElement) alpha *= Number(getComputedStyle(e).opacity);
@@ -88,6 +159,10 @@
     const d = {};
     const fill = solidFill(el, cs);
     if (fill) d.fill = fill;
+    const fillRaw = fill && translucent(el, cs.backgroundColor);
+    if (fillRaw) d.fillRaw = fillRaw;
+    const shadow = shadows(el, cs);
+    if (shadow) d.shadow = shadow;
     if (cs.backgroundImage && cs.backgroundImage !== 'none') {
       const url = cs.backgroundImage.match(/url\("?([^")]+)"?\)/);
       if (url) d.bgImage = url[1];
@@ -116,8 +191,19 @@
     // Raio (o maior canto): círculo pequeno com ícone/texto vai como imagem redonda.
     const radius = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => parseFloat(cs[`border${c}Radius`]) || 0));
     if (radius > 0.5) d.radius = radius;
-    // Sombra é ignorada: o fundo vai no preenchimento da tabela (padrão da equipe).
+    // Sombra: o Word ignora (o fundo vai no preenchimento da tabela); o PowerPoint desenha.
     return d;
+  };
+
+  /**
+   * Cor do texto. Transparente (opacity, rgba) sobre fundo de cor conhecida:
+   * a cor que aparece, misturada (Word não tem texto transparente e o PDF do
+   * PowerPoint ignora). Sobre imagem: a cor com alfa.
+   */
+  const textColor = (el, cs) => {
+    const t = translucent(el, cs.color);
+    if (t && behind(el)) return { color: blend(el, cs.color) || color(cs.color) || '000000' };
+    return { color: color(cs.color) || '000000', alpha: t?.alpha };
   };
 
   /** Fonte, peso, cor... de um trecho de texto. */
@@ -130,7 +216,7 @@
       weight: Number(cs.fontWeight) || 400,
       italic: cs.fontStyle === 'italic' || cs.fontStyle === 'oblique',
       size: parseFloat(cs.fontSize) || 16,
-      color: color(cs.color) || '000000',
+      ...textColor(el, cs),
       caps: cs.textTransform === 'uppercase',
       lower: cs.textTransform === 'lowercase',
       letterSpacing: parseFloat(cs.letterSpacing) || 0,
@@ -176,8 +262,53 @@
         const c = contentBox(li);
         current.x = c.x;
         current.indent = Math.max(0, c.x - box(li.closest('ul,ol') || li.parentElement).x);
+        // Cor e tamanho do marcador (::marker), que o CSS costuma deixar mais discreto que o texto.
+        const mk = getComputedStyle(li, '::marker');
+        const mc = color(mk.color);
+        if (mc) current.marker = { color: mc, alpha: translucent(li, mk.color)?.alpha, size: parseFloat(mk.fontSize) || undefined };
       }
       paras.push(current);
+    };
+    /**
+     * Começo de cada linha nova dentro do trecho: letra cujo topo desce em
+     * relação à anterior (no mesmo parágrafo, inclusive vindo do trecho de
+     * antes). Só letras visíveis contam (o espaço da quebra fica no fim).
+     */
+    const lineBreaks = (node, text, rects) => {
+      const out = [];
+      // Linha da letra pela linha de base (a letra menor na mesma linha tem o topo mais baixo).
+      const step = (rect, i) => {
+        const base = rect.bottom - rect.height * 0.22;
+        if (current.lineBase == null) {
+          current.lineBase = base;
+          current.lineH = rect.height;
+          return;
+        }
+        if (base > current.lineBase + 0.45 * Math.min(rect.height, current.lineH)) {
+          out.push(i);
+          current.lineBase = base;
+          current.lineH = rect.height;
+        }
+      };
+      const first = text.search(/\S/);
+      const solid = rects.filter((x) => x.width > 0);
+      // Trecho numa linha só: basta ver se ele começou numa linha nova.
+      if (new Set(solid.map((x) => Math.round(x.top))).size <= 1) {
+        if (solid.length) step(solid[0], first);
+        return out;
+      }
+      const r = document.createRange();
+      for (let i = first; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if (code >= 0xdc00 && code <= 0xdfff) continue;
+        if (/\s/.test(text[i])) continue;
+        const end = code >= 0xd800 && code <= 0xdbff ? i + 2 : i + 1;
+        r.setStart(node, i);
+        r.setEnd(node, Math.min(end, text.length));
+        const rect = [...r.getClientRects()].find((x) => x.width > 0);
+        if (rect) step(rect, i);
+      }
+      return out;
     };
     const walk = (node, list, linkRef) => {
       if (node.nodeType === 3) {
@@ -196,9 +327,16 @@
         const mid = (r) => r.top + r.height / 2 + window.scrollY;
         const solid = rects.filter((r) => r.width > 0);
         if (solid.length && text.trim()) {
-          if (current.first === undefined) current.first = mid(solid[0]);
+          if (current.first === undefined) {
+            current.first = mid(solid[0]);
+            // Altura da área do texto (ascendente + descendente da fonte): com
+            // entrelinha apertada o PowerPoint sobe a linha, e isso corrige.
+            current.area = solid[0].height;
+          }
           current.last = mid(solid[solid.length - 1]);
         }
+        // Onde a linha quebrou no Studio (índices do texto): o PowerPoint quebra no mesmo lugar.
+        const breaks = text.trim() ? lineBreaks(node, text, rects) : [];
         if (autonumberBox && autonumberGap === null && text.trim() && rects.length) {
           const first = rects[0];
           const top = first.top + window.scrollY;
@@ -208,7 +346,7 @@
         }
         // Espaço em branco que o navegador junta (white-space normal): o PowerPoint precisa saber.
         const collapse = /^(normal|nowrap)$/.test(getComputedStyle(node.parentElement).whiteSpace) || undefined;
-        current.runs.push({ t: text.replace(/\n/g, ' '), ...runStyle(node.parentElement), link: linkRef || null, width, lines, collapse });
+        current.runs.push({ t: text.replace(/\n/g, ' '), ...runStyle(node.parentElement), link: linkRef || null, width, lines, collapse, breaks: breaks.length ? breaks : undefined });
         return;
       }
       if (node.nodeType !== 1) return;
@@ -237,6 +375,7 @@
       }
       if (node.tagName === 'BR') {
         if (!current) open(node.parentElement, list);
+        current.lineBase = null;
         current.runs.push({ br: true });
         return;
       }
@@ -264,6 +403,10 @@
     };
     [...el.childNodes].forEach((c) => walk(c, null, link));
     const keep = paras.filter((p) => p.runs.length);
+    for (const p of keep) {
+      delete p.lineBase;
+      delete p.lineH;
+    }
     if (!keep.length && !autonumber) return null;
     // Texto some da captura de um bloco complexo (ele vai editável por cima).
     el.setAttribute('data-dx-text', '');
@@ -369,7 +512,14 @@
       const x1 = Math.min(n.box.x + n.box.w, b.x + b.w);
       const y1 = Math.min(n.box.y + n.box.h, b.y + b.h);
       if (x1 - x0 < 0.5 || y1 - y0 < 0.5) return null;
-      if (n.k === 'text' || n.k === 'img' || n.k === 'raster') return n;
+      if (n.k === 'text') return n;
+      // Imagem que passa da borda: o pedaço de dentro vai em `clip` (o
+      // PowerPoint captura só ele — o brilho do card não vaza; o Word monta
+      // a tabela pela caixa inteira).
+      if (n.k === 'img' || n.k === 'raster') {
+        const inside = x0 - n.box.x < 0.5 && y0 - n.box.y < 0.5 && n.box.x + n.box.w - x1 < 0.5 && n.box.y + n.box.h - y1 < 0.5;
+        return inside ? n : { ...n, clip: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } };
+      }
       const out = { ...n, box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } };
       if (n.kids) out.kids = n.kids.map(clip).filter(Boolean);
       return out;

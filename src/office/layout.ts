@@ -11,7 +11,18 @@ import type { RenderMeta } from '../render.js';
 /** Formato do número do rodapé do Studio (`data-document-footer-format`). */
 export type FooterNumberFormat = 'page-total' | 'page' | 'page-of-total';
 
-export type Border = { w: number; color: string };
+/** Cor com transparência (alfa de 0 a 1). */
+export type Tint = { color: string; alpha: number };
+export type Border = {
+  w: number;
+  /** Cor já misturada com o que está atrás (o Word não tem transparência). */
+  color: string;
+  /** A cor transparente de verdade (PowerPoint). */
+  raw?: Tint;
+  style?: 'dashed' | 'dotted';
+};
+/** box-shadow por fora. */
+export type Shadow = { x: number; y: number; blur: number; spread: number; color: string; alpha: number };
 export type Box = { x: number; y: number; w: number; h: number };
 export type Run = {
   t?: string;
@@ -21,6 +32,8 @@ export type Run = {
   italic: boolean;
   size: number;
   color: string;
+  /** Transparência do texto (PowerPoint). */
+  alpha?: number;
   caps: boolean;
   lower: boolean;
   letterSpacing: number;
@@ -35,6 +48,8 @@ export type Run = {
   lines?: number;
   /** Espaços em sequência viram um só (white-space normal). */
   collapse?: boolean;
+  /** Onde começa cada linha nova no Studio (índice no texto). */
+  breaks?: number[];
 };
 export type Para = {
   align: 'left' | 'center' | 'right' | 'both';
@@ -48,9 +63,16 @@ export type Para = {
   /** Meio da primeira e da última linha (px, página). */
   first?: number;
   last?: number;
+  /** Altura da área do texto na primeira linha (ascendente + descendente, px). */
+  area?: number;
+  /** Marcador do item de lista (::marker). */
+  marker?: { color: string; alpha?: number; size?: number };
 };
 type Deco = {
   fill?: string;
+  /** Preenchimento transparente de verdade (PowerPoint); `fill` é a mistura. */
+  fillRaw?: Tint;
+  shadow?: Shadow[];
   bgImage?: string;
   border?: Partial<Record<'top' | 'right' | 'bottom' | 'left', Border>>;
   pad?: [number, number, number, number];
@@ -81,8 +103,8 @@ export type LayoutNode =
       /** Vão entre o número e o texto que vem depois dele na mesma linha (px). */
       autonumberGap?: number | null;
     } & Deco)
-  | { k: 'img'; id: number; box: Box; src: string; abs?: boolean; radius?: number }
-  | { k: 'raster'; id: number; box: Box; abs?: boolean }
+  | { k: 'img'; id: number; box: Box; src: string; abs?: boolean; radius?: number; clip?: Box }
+  | { k: 'raster'; id: number; box: Box; abs?: boolean; clip?: Box }
   | ({ k: 'shape'; id: number; box: Box } & Deco)
   | ({
       k: 'box';

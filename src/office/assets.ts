@@ -202,7 +202,14 @@ export const makeAssets = (page: Page): Assets => {
       })()`);
     }
   };
-  const raster = (id: number, _box: Box) => capture(id, 'all');
+  /** Captura do elemento; recortada quando a caixa é só o pedaço visível (enfeite que passa da borda do card). */
+  const raster = async (id: number, box: Box) => {
+    const full = (await page.evaluate(
+      `(() => { const r = document.querySelector('[data-dx="${id}"]')?.getBoundingClientRect(); return r && { x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height }; })()`,
+    )) as Box | null;
+    const cut = full && (['x', 'y', 'w', 'h'] as const).some((k) => Math.abs(full[k] - box[k]) > 0.5);
+    return capture(id, 'all', cut ? box : undefined);
+  };
   const paint = (id: number) => capture(id, 'alone');
   const backdrop = (id: number, clip: Box) => capture(id, 'notext', clip);
   return { image, raster, paint, backdrop, pageImage };
