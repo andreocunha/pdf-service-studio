@@ -195,6 +195,13 @@
       if (!visible(node, cs)) return;
       if (node.matches('a[data-zone-link]')) return; // sobreposição de clique, sem texto
       if (node.hasAttribute('data-autonumber')) {
+        // Número no meio do parágrafo ("Capítulo II"): a lista do Word só põe
+        // número no começo, então vai como texto, no lugar dele.
+        if (current && current.runs.some((r) => r.t && r.t.trim())) {
+          const text = node.textContent;
+          if (text) current.runs.push({ t: text, ...runStyle(node), link: linkRef || null, width: node.getBoundingClientRect().width, lines: 1 });
+          return;
+        }
         // Com estilo ("c", "IV"), o caminho real vem no atributo; o texto é o que aparece.
         autonumber = node.getAttribute('data-autonumber-path') || node.textContent.trim();
         autonumberFormat = node.getAttribute('data-autonumber-path') ? node.getAttribute('data-autonumber') : null;
