@@ -57,24 +57,46 @@ const svgToPng = async (svg: Buffer, w: number, h: number): Promise<Buffer> => {
   }
 };
 
+/** Largura × altura de PNG/JPEG pelo cabeçalho (sem decodificar). */
+const rasterSize = (data: Buffer, type: string): { w: number; h: number } | null => {
+  if (type === 'png' && data.length > 24) return { w: data.readUInt32BE(16), h: data.readUInt32BE(20) };
+  if (type !== 'jpg') return null;
+  for (let i = 2; i + 9 < data.length; ) {
+    if (data[i] !== 0xff) return null;
+    const marker = data[i + 1];
+    const len = data.readUInt16BE(i + 2);
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+      return { w: data.readUInt16BE(i + 7), h: data.readUInt16BE(i + 5) };
+    }
+    i += 2 + len;
+  }
+  return null;
+};
+
 /**
- * Imagem raster redesenhada pelo Chromium no tamanho da caixa, com o mesmo
+ * Imagem raster redesenhada pelo Chromium no tamanho da caixa, a partir dos
+ * bytes já baixados (data URL — sem segundo download nem URL no HTML), com o
  * enquadramento do Studio: o Word estica a imagem até a caixa (o editor
  * recorta com cover) e não lê WebP (a importação do Studio converte fotos
- * para WebP — o fundo sumia no .docx).
+ * para WebP — o fundo sumia no .docx). `cover` sai em JPEG (fundo opaco,
+ * arquivo menor); `contain` em PNG (preserva transparência).
  */
-const rasterToPng = async (src: string, w: number, h: number, fit: 'cover' | 'contain'): Promise<Buffer | null> => {
+const redraw = async (data: Buffer, mime: string, w: number, h: number, fit: 'cover' | 'contain'): Promise<ImageData | null> => {
   const browser = await getBrowser();
   const tab = await browser.newPage();
   try {
     await tab.setViewport({ width: Math.ceil(w), height: Math.ceil(h), deviceScaleFactor: SCALE });
     await tab.setContent(
-      `<html><body style="margin:0;background:transparent"><img src="${src.replace(/"/g, '&quot;')}" style="display:block;width:${w}px;height:${h}px;object-fit:${fit};object-position:center"></body></html>`,
-      { waitUntil: 'load', timeout: 20_000 },
+      `<html><body style="margin:0;background:transparent"><img style="display:block;width:${w}px;height:${h}px;object-fit:${fit};object-position:center"></body></html>`,
     );
-    const ok = await tab.evaluate(`(() => { const i = document.querySelector('img'); return !!i && i.complete && i.naturalWidth > 0; })()`);
+    const ok = await tab.evaluate(
+      `new Promise((done) => { const i = document.querySelector('img'); i.onload = () => done(i.naturalWidth > 0); i.onerror = () => done(false); i.src = ${JSON.stringify(`data:${mime};base64,${data.toString('base64')}`)}; setTimeout(() => done(false), 15000); })`,
+    );
     if (!ok) return null;
-    return Buffer.from(await tab.screenshot({ type: 'png', omitBackground: true, clip: { x: 0, y: 0, width: w, height: h } }));
+    const clip = { x: 0, y: 0, width: w, height: h };
+    return fit === 'cover'
+      ? { data: Buffer.from(await tab.screenshot({ type: 'jpeg', quality: 88, clip })), type: 'jpg' }
+      : { data: Buffer.from(await tab.screenshot({ type: 'png', omitBackground: true, clip })), type: 'png' };
   } catch {
     return null;
   } finally {
@@ -82,32 +104,59 @@ const rasterToPng = async (src: string, w: number, h: number, fit: 'cover' | 'co
   }
 };
 
-const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData | null>> } => {
+const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData | null>>; pageImage: (src: string, w: number, h: number) => Promise<ImageData | null> } => {
   const cache = new Map<string, Promise<ImageData | null>>();
-  const image = (src: string, w: number, h: number) => {
-    const key = `${src}|${Math.round(w)}x${Math.round(h)}`;
-    let hit = cache.get(key);
+  // Um download por URL, mesmo com a imagem em vários tamanhos/usos.
+  const downloads = new Map<string, Promise<{ data: Buffer; mime: string } | null>>();
+  const download = (src: string) => {
+    let hit = downloads.get(src);
     if (!hit) {
       hit = (async () => {
         try {
           const res = await fetch(src, { signal: AbortSignal.timeout(15_000) });
           if (!res.ok) return null;
-          const data = Buffer.from(await res.arrayBuffer());
-          const type = typeOf(res.headers.get('content-type') ?? '', src);
-          // O navegador desenha o SVG sem distorcer (preserveAspectRatio); o Word estica até a caixa.
-          if (type === 'svg') return { svg: data, data: await svgToPng(data, w, h), type: 'png', aspect: svgAspect(data) };
-          if (type) return { data, type };
-          // WebP e afins: o Word não lê — vai como PNG desenhado pelo Chromium.
-          const png = /^image\//.test(res.headers.get('content-type') ?? '') ? await rasterToPng(src, w, h, 'contain') : null;
-          return png ? { data: png, type: 'png' } : null;
+          return { data: Buffer.from(await res.arrayBuffer()), mime: (res.headers.get('content-type') ?? '').split(';')[0].trim() };
         } catch {
           return null;
         }
       })();
+      downloads.set(src, hit);
+    }
+    return hit;
+  };
+  const cached = (key: string, make: () => Promise<ImageData | null>) => {
+    let hit = cache.get(key);
+    if (!hit) {
+      hit = make().catch(() => null);
       cache.set(key, hit);
     }
     return hit;
   };
+  const image = (src: string, w: number, h: number) =>
+    cached(`${src}|${Math.round(w)}x${Math.round(h)}`, async () => {
+      const got = await download(src);
+      if (!got) return null;
+      const type = typeOf(got.mime, src);
+      // O navegador desenha o SVG sem distorcer (preserveAspectRatio); o Word estica até a caixa.
+      if (type === 'svg') return { svg: got.data, data: await svgToPng(got.data, w, h), type: 'png', aspect: svgAspect(got.data) };
+      if (type) return { data: got.data, type };
+      // WebP e afins: o Word não lê — vai como PNG desenhado pelo Chromium.
+      return /^image\//.test(got.mime) ? redraw(got.data, got.mime, w, h, 'contain') : null;
+    });
+  /** Fundo de página raster: recorte "cover" como no Studio. PNG/JPEG que já
+   *  têm a proporção da página vão como estão (sem reamostrar). */
+  const pageImage = (src: string, w: number, h: number) =>
+    cached(`page|${src}|${Math.round(w)}x${Math.round(h)}`, async () => {
+      const got = await download(src);
+      if (!got) return null;
+      const type = typeOf(got.mime, src);
+      if (type === 'svg') return image(src, w, h);
+      if (type === 'png' || type === 'jpg') {
+        const size = rasterSize(got.data, type);
+        if (size && Math.abs(size.w / size.h - w / h) <= 0.02 * (w / h)) return { data: got.data, type };
+      }
+      return /^image\//.test(got.mime) ? redraw(got.data, got.mime, w, h, 'cover') : null;
+    });
   /**
    * Captura só o elemento, com fundo transparente: o resto da página some
    * (o texto por cima da arte de um banner sairia duplicado — ele já vai
@@ -152,7 +201,7 @@ const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData
   const raster = (id: number, _box: Box) => capture(id, 'all');
   const paint = (id: number) => capture(id, 'alone');
   const backdrop = (id: number, clip: Box) => capture(id, 'notext', clip);
-  return { image, raster, paint, backdrop, cache };
+  return { image, raster, paint, backdrop, cache, pageImage };
 };
 
 /**
@@ -272,11 +321,8 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
       if (!p.bgImage) return null;
       // Fundo vai como PNG desenhado pelo Chromium: o Word não desenha certo
       // todo SVG (os desenhos do pé do Quadro resumo sumiam) e fundo não se edita.
-      const img = await assets.image(p.bgImage, p.box.w, p.box.h);
-      if (img?.svg) return { data: img.data, type: img.type };
-      // Foto/ilustração de fundo: recorte "cover" como no Studio, não esticada.
-      const png = img ? await rasterToPng(p.bgImage, p.box.w, p.box.h, 'cover') : null;
-      return png ? { data: png, type: 'png' } : img;
+      const img = await assets.pageImage(p.bgImage, p.box.w, p.box.h);
+      return img?.svg ? { data: img.data, type: img.type } : img;
     };
 
     const { doc, used, pageOffsets } = await buildDocument({ layout, fonts, assets, background, coverPages: covers });
