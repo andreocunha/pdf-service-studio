@@ -57,6 +57,31 @@ const svgToPng = async (svg: Buffer, w: number, h: number): Promise<Buffer> => {
   }
 };
 
+/**
+ * Imagem raster redesenhada pelo Chromium no tamanho da caixa, com o mesmo
+ * enquadramento do Studio: o Word estica a imagem até a caixa (o editor
+ * recorta com cover) e não lê WebP (a importação do Studio converte fotos
+ * para WebP — o fundo sumia no .docx).
+ */
+const rasterToPng = async (src: string, w: number, h: number, fit: 'cover' | 'contain'): Promise<Buffer | null> => {
+  const browser = await getBrowser();
+  const tab = await browser.newPage();
+  try {
+    await tab.setViewport({ width: Math.ceil(w), height: Math.ceil(h), deviceScaleFactor: SCALE });
+    await tab.setContent(
+      `<html><body style="margin:0;background:transparent"><img src="${src.replace(/"/g, '&quot;')}" style="display:block;width:${w}px;height:${h}px;object-fit:${fit};object-position:center"></body></html>`,
+      { waitUntil: 'load', timeout: 20_000 },
+    );
+    const ok = await tab.evaluate(`(() => { const i = document.querySelector('img'); return !!i && i.complete && i.naturalWidth > 0; })()`);
+    if (!ok) return null;
+    return Buffer.from(await tab.screenshot({ type: 'png', omitBackground: true, clip: { x: 0, y: 0, width: w, height: h } }));
+  } catch {
+    return null;
+  } finally {
+    await tab.close().catch(() => undefined);
+  }
+};
+
 const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData | null>> } => {
   const cache = new Map<string, Promise<ImageData | null>>();
   const image = (src: string, w: number, h: number) => {
@@ -71,7 +96,10 @@ const makeAssets = (page: Page): Assets & { cache: Map<string, Promise<ImageData
           const type = typeOf(res.headers.get('content-type') ?? '', src);
           // O navegador desenha o SVG sem distorcer (preserveAspectRatio); o Word estica até a caixa.
           if (type === 'svg') return { svg: data, data: await svgToPng(data, w, h), type: 'png', aspect: svgAspect(data) };
-          return type ? { data, type } : null;
+          if (type) return { data, type };
+          // WebP e afins: o Word não lê — vai como PNG desenhado pelo Chromium.
+          const png = /^image\//.test(res.headers.get('content-type') ?? '') ? await rasterToPng(src, w, h, 'contain') : null;
+          return png ? { data: png, type: 'png' } : null;
         } catch {
           return null;
         }
@@ -245,7 +273,10 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
       // Fundo vai como PNG desenhado pelo Chromium: o Word não desenha certo
       // todo SVG (os desenhos do pé do Quadro resumo sumiam) e fundo não se edita.
       const img = await assets.image(p.bgImage, p.box.w, p.box.h);
-      return img?.svg ? { data: img.data, type: img.type } : img;
+      if (img?.svg) return { data: img.data, type: img.type };
+      // Foto/ilustração de fundo: recorte "cover" como no Studio, não esticada.
+      const png = img ? await rasterToPng(p.bgImage, p.box.w, p.box.h, 'cover') : null;
+      return png ? { data: png, type: 'png' } : img;
     };
 
     const { doc, used, pageOffsets } = await buildDocument({ layout, fonts, assets, background, coverPages: covers });
