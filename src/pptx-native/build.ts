@@ -136,7 +136,47 @@ const SLIDENUM_FIELD = '{B6F15528-21DE-4FAA-801E-634DDDAF4B2B}';
 // Montagem
 // ---------------------------------------------------------------------------
 
+const covers = (b: Box, page: Box) =>
+  Math.abs(b.x - page.x) < 2 && Math.abs(b.y - page.y) < 2 && Math.abs(b.w - page.w) < 2 && Math.abs(b.h - page.h) < 2;
+const hasText = (n: LayoutNode): boolean => n.k === 'text' || (n.k === 'box' && n.kids.some(hasText));
+/** Ids no DOM das peças inteiras (caixa sem elemento próprio — display: contents — vale pelos filhos). */
+const domIds = (n: LayoutNode): number[] => (n.k === 'box' && n.layout.display === 'contents' ? n.kids.flatMap(domIds) : [n.id]);
+
 export const buildDeck = async ({ layout, fonts, assets, background }: BuildInput): Promise<Deck> => {
+  /**
+   * Fundo do slide a partir de um design de página inteira (frame do
+   * Figma): a moldura que cobre a página e as camadas de baixo dela — o que
+   * vem antes do primeiro texto (painel, ilustração, arcos). Só a cor da
+   * moldura: cor de fundo do slide; com camadas ou pintura: uma imagem de
+   * fundo (fica no lugar, não se seleciona sem querer).
+   */
+  const slideBackdrop = async (page: DocumentLayout['pages'][number], trees: LayoutNode[]) => {
+    for (const tree of trees) {
+      const frames: Extract<LayoutNode, { k: 'box' | 'shape' }>[] = [];
+      let n: LayoutNode = tree;
+      let container: Extract<LayoutNode, { k: 'box' }> | null = null;
+      while ((n.k === 'box' || n.k === 'shape') && covers(n.box, page.box)) {
+        if (n.fill || n.fillRaw || n.paint || n.bgImage) frames.push(n);
+        if (n.k !== 'box') break;
+        container = n;
+        if (n.kids.length === 1 && n.kids[0].k === 'box' && covers(n.kids[0].box, page.box)) n = n.kids[0];
+        else break;
+      }
+      if (!frames.length) continue;
+      const layers: LayoutNode[] = [];
+      for (const kid of container?.kids ?? []) {
+        if (hasText(kid)) break;
+        layers.push(kid);
+      }
+      const top = frames[frames.length - 1];
+      const plain = frames.length === 1 && !layers.length && !top.paint && !top.bgImage && !top.fillRaw && top.fill && !page.bgImage;
+      if (plain) return { frames, layers, color: top.fill!, image: null };
+      const image = await assets.layers(page.index, frames.map((f) => f.id), layers.flatMap(domIds), page.box);
+      if (image) return { frames, layers, color: null, image };
+    }
+    return null;
+  };
+
   const used = new Set<Face>();
   const usage = new Map<Face, number>();
   const media: Media[] = [];
@@ -494,10 +534,16 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
 
     // --- árvore -----------------------------------------------------------
 
+    // Peças que foram pro fundo do slide: a moldura (só a pintura) e as camadas de baixo (inteiras).
+    const inBackground = new Set<LayoutNode>();
+    const frameOnly = new Set<LayoutNode>();
+
     const walk = async (n: LayoutNode, parent?: Extract<LayoutNode, { k: 'box' }>): Promise<void> => {
+      if (inBackground.has(n)) return;
       if (n.k === 'text') return text(n);
       // Passa da borda de um card que recorta: só o pedaço visível, capturado.
       if ((n.k === 'img' || n.k === 'raster') && n.clip) {
+        if (n.clip.w < 0.5 || n.clip.h < 0.5) return; // toda fora da área que recorta
         const img = await assets.raster(n.id, n.clip);
         return img ? picture(img, n.clip) : undefined;
       }
@@ -512,15 +558,24 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
         const img = await assets.raster(n.id, n.box);
         return img ? picture(img, n.box) : undefined;
       }
-      await decorate(n);
+      if (!frameOnly.has(n)) await decorate(n);
       if (n.k === 'box') for (const kid of n.kids) await walk(kid, n);
     };
 
     // --- página -----------------------------------------------------------
 
-    const bg = await background(page.index);
+    const backdrop = await slideBackdrop(page, layout.blocks.filter((b) => b.page === page.index && b.tree).map((b) => b.tree!));
     let bgXml = '';
-    if (bg && page.bgColor && page.bgColor !== 'ffffff') {
+    if (backdrop) {
+      for (const n of backdrop.frames) frameOnly.add(n);
+      for (const n of backdrop.layers) inBackground.add(n);
+    }
+    const bg = backdrop ? null : await background(page.index);
+    if (backdrop?.color) {
+      bgXml = `<p:bg><p:bgPr>${solid(backdrop.color)}<a:effectLst/></p:bgPr></p:bg>`;
+    } else if (backdrop?.image) {
+      bgXml = `<p:bg><p:bgPr><a:blipFill dpi="0" rotWithShape="1"><a:blip r:embed="${imageRel(backdrop.image)}"/><a:srcRect/><a:stretch><a:fillRect/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg>`;
+    } else if (bg && page.bgColor && page.bgColor !== 'ffffff') {
       // Cor + imagem (que pode ser transparente): cor no fundo, imagem travada por cima.
       bgXml = `<p:bg><p:bgPr>${solid(page.bgColor)}<a:effectLst/></p:bgPr></p:bg>`;
       picture(bg, page.box, { name: 'Fundo da página', locked: true });

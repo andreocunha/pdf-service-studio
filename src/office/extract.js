@@ -17,11 +17,53 @@
     return { x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height };
   };
 
+  /**
+   * Escala de desenho do elemento: produto dos transform dos ancestrais (o
+   * bloco do Figma é desenhado em 1920px com scale(0.55)). O getComputedStyle
+   * dá os tamanhos antes da escala (fonte de 146px que aparece com 80px) —
+   * todo comprimento do CSS passa por aqui; as caixas (getBoundingClientRect)
+   * já vêm escaladas.
+   */
+  const scaleCache = new Map();
+  const scaleOf = (el) => {
+    if (!el || el === document.body || el === document.documentElement) return 1;
+    if (scaleCache.has(el)) return scaleCache.get(el);
+    let s = scaleOf(el.parentElement);
+    const t = getComputedStyle(el).transform;
+    if (t && t !== 'none') {
+      try {
+        const m = new DOMMatrixReadOnly(t);
+        const k = Math.hypot(m.a, m.b);
+        if (k > 0.01) s *= k;
+      } catch {}
+    }
+    scaleCache.set(el, s);
+    return s;
+  };
+  /** Girado ou espelhado por algum transform (seta do Figma reaproveitada de lado). */
+  const turnCache = new Map();
+  const turned = (el) => {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    if (turnCache.has(el)) return turnCache.get(el);
+    let v = turned(el.parentElement);
+    const t = getComputedStyle(el).transform;
+    if (!v && t && t !== 'none') {
+      try {
+        const m = new DOMMatrixReadOnly(t);
+        v = Math.abs(m.b) > 1e-3 || Math.abs(m.c) > 1e-3 || m.a < 0 || m.d < 0;
+      } catch {}
+    }
+    turnCache.set(el, v);
+    return v;
+  };
+  /** Comprimento do CSS ("24px") como aparece na página. */
+  const len = (el, v) => (parseFloat(v) || 0) * scaleOf(el);
+
   /** Área do conteúdo (sem padding e borda): onde o texto começa de verdade. */
   const contentBox = (el) => {
     const b = box(el);
     const cs = getComputedStyle(el);
-    const px = (p) => parseFloat(cs[p]) || 0;
+    const px = (p) => len(el, cs[p]);
     const l = px('paddingLeft') + px('borderLeftWidth');
     const t = px('paddingTop') + px('borderTopWidth');
     const r = px('paddingRight') + px('borderRightWidth');
@@ -86,7 +128,7 @@
   };
 
   const border = (el, cs, side) => {
-    const w = parseFloat(cs[`border${side}Width`]) || 0;
+    const w = len(el, cs[`border${side}Width`]);
     const style = cs[`border${side}Style`];
     if (!w || style === 'none' || style === 'hidden') return null;
     const c = blend(el, cs[`border${side}Color`], true);
@@ -110,7 +152,7 @@
         const nums = s.replace(/(?:rgba?|lab|lch|oklab|oklch|hsla?|hwb|color)\([^)]*\)/, '').trim().split(/\s+/).map(parseFloat);
         const raw = c && (translucent(el, c[0]) || { color: color(c[0]), alpha: 1 });
         if (!raw || !raw.color) return null;
-        const [x = 0, y = 0, blur = 0, spread = 0] = nums;
+        const [x = 0, y = 0, blur = 0, spread = 0] = nums.map((v) => v * scaleOf(el));
         return { x, y, blur, spread, color: raw.color, alpha: raw.alpha };
       })
       .filter(Boolean);
@@ -199,10 +241,10 @@
       if (v) b[side.toLowerCase()] = v;
     }
     if (Object.keys(b).length) d.border = b;
-    const pad = ['Top', 'Right', 'Bottom', 'Left'].map((s) => parseFloat(cs[`padding${s}`]) || 0);
+    const pad = ['Top', 'Right', 'Bottom', 'Left'].map((s) => len(el, cs[`padding${s}`]));
     if (pad.some((v) => v > 0)) d.pad = pad;
     // Raio (o maior canto): círculo pequeno com ícone/texto vai como imagem redonda.
-    const radius = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => parseFloat(cs[`border${c}Radius`]) || 0));
+    const radius = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => len(el, cs[`border${c}Radius`])));
     if (radius > 0.5) d.radius = radius;
     // Sombra: o Word ignora (o fundo vai no preenchimento da tabela); o PowerPoint desenha.
     return d;
@@ -229,11 +271,11 @@
       font: family,
       weight: Number(cs.fontWeight) || 400,
       italic: cs.fontStyle === 'italic' || cs.fontStyle === 'oblique',
-      size: parseFloat(cs.fontSize) || 16,
+      size: len(el, cs.fontSize) || 16,
       ...textColor(el, cs),
       caps: cs.textTransform === 'uppercase',
       lower: cs.textTransform === 'lowercase',
-      letterSpacing: parseFloat(cs.letterSpacing) || 0,
+      letterSpacing: len(el, cs.letterSpacing),
       underline: deco.includes('underline'),
       strike: deco.includes('line-through'),
       highlight: el.tagName === 'MARK' ? color(cs.backgroundColor) : null,
@@ -243,11 +285,11 @@
 
   const paraStyle = (el) => {
     const cs = getComputedStyle(el);
-    const lh = cs.lineHeight === 'normal' ? null : parseFloat(cs.lineHeight);
+    const lh = cs.lineHeight === 'normal' ? null : len(el, cs.lineHeight);
     return {
       align: { center: 'center', right: 'right', end: 'right', justify: 'both' }[cs.textAlign] || 'left',
       lineHeight: lh,
-      fontSize: parseFloat(cs.fontSize) || 16,
+      fontSize: len(el, cs.fontSize) || 16,
     };
   };
 
@@ -279,7 +321,7 @@
         // Cor e tamanho do marcador (::marker), que o CSS costuma deixar mais discreto que o texto.
         const mk = getComputedStyle(li, '::marker');
         const mc = color(mk.color);
-        if (mc) current.marker = { color: mc, alpha: translucent(li, mk.color)?.alpha, size: parseFloat(mk.fontSize) || undefined };
+        if (mc) current.marker = { color: mc, alpha: translucent(li, mk.color)?.alpha, size: len(li, mk.fontSize) || undefined };
       }
       paras.push(current);
     };
@@ -463,14 +505,26 @@
   const node = (el, link) => {
     const cs = getComputedStyle(el);
     if (!visible(el, cs)) return null;
+    // display: contents (agrupamento do Figma) não tem caixa: vale o que tem dentro.
+    if (cs.display === 'contents') {
+      const inner = [...el.children].map((c) => node(c, link)).filter(Boolean);
+      if (inner.length <= 1) return inner[0] || null;
+      const x0 = Math.min(...inner.map((k) => k.box.x));
+      const y0 = Math.min(...inner.map((k) => k.box.y));
+      const x1 = Math.max(...inner.map((k) => k.box.x + k.box.w));
+      const y1 = Math.max(...inner.map((k) => k.box.y + k.box.h));
+      return { k: 'box', id: nextId++, box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, abs: false, layout: layoutOf(cs), kids: inner };
+    }
     const b = box(el);
     if (b.w < 0.5 || b.h < 0.5) return null;
     const tag = el.tagName;
     const abs = cs.position === 'absolute' || cs.position === 'fixed';
     if (tag === 'IMG') {
       el.setAttribute('data-dx', String(nextId));
-      const r = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => parseFloat(cs[`border${c}Radius`]) || 0));
+      const r = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => len(el, cs[`border${c}Radius`])));
       const radius = r > 0.5 ? r : undefined;
+      // Girada/espelhada: o arquivo está de outro jeito — só a captura mostra igual.
+      if (turned(el)) return { k: 'raster', id: nextId++, box: b, abs };
       // object-fit: a imagem desenhada não é a caixa. "contain" encolhe
       // mantendo a proporção (o Word esticaria até a caixa); "cover" recorta
       // — só a captura mostra igual.
@@ -531,16 +585,30 @@
       // Imagem que passa da borda: o pedaço de dentro vai em `clip` (o
       // PowerPoint captura só ele — o brilho do card não vaza; o Word monta
       // a tabela pela caixa inteira).
-      if (n.k === 'img' || n.k === 'raster') {
-        const inside = x0 - n.box.x < 0.5 && y0 - n.box.y < 0.5 && n.box.x + n.box.w - x1 < 0.5 && n.box.y + n.box.h - y1 < 0.5;
-        return inside ? n : { ...n, clip: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } };
-      }
+      if (n.k === 'img' || n.k === 'raster') return clipMedia(n);
       const out = { ...n, box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } };
       if (n.kids) out.kids = n.kids.map(clip).filter(Boolean);
       return out;
     };
+    // Só o `clip` das imagens (o que o PowerPoint mostra); a caixa delas fica.
+    // Fora da área: clip vazio (o PowerPoint pula; o Word segue como era).
+    const clipMedia = (n) => {
+      if (n.k === 'img' || n.k === 'raster') {
+        const r = n.clip || n.box;
+        const x0 = Math.max(r.x, b.x);
+        const y0 = Math.max(r.y, b.y);
+        const x1 = Math.min(r.x + r.w, b.x + b.w);
+        const y1 = Math.min(r.y + r.h, b.y + b.h);
+        const c = { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+        const same = Math.abs(c.x - n.box.x) < 0.5 && Math.abs(c.y - n.box.y) < 0.5 && Math.abs(c.w - n.box.w) < 0.5 && Math.abs(c.h - n.box.h) < 0.5;
+        return same ? n : { ...n, clip: c };
+      }
+      return n.kids ? { ...n, kids: n.kids.map(clipMedia) } : n;
+    };
     let kids = [...el.children].map((c) => node(c, link)).filter(Boolean);
     if (clips && (deco.fill || deco.border)) kids = kids.map((k) => (k.abs && k.k !== 'text' ? clip(k) : k)).filter(Boolean);
+    // Grupo que recorta sem cor própria ("Mask group" do Figma): só as imagens.
+    else if (clips) kids = kids.map(clipMedia);
     if (!kids.length) {
       // Caixa vazia com cor = forma (barra, linha divisória, quadrado).
       if (deco.fill || deco.border || deco.bgImage) return { k: 'shape', id: mark(el, deco), box: b, ...deco, abs: positioned };

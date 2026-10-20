@@ -17,6 +17,12 @@ export type Assets = {
   paint: (id: number) => Promise<ImageData | null>;
   /** Tudo do elemento menos o texto (bloco complexo). */
   backdrop: (id: number, clip: Box) => Promise<ImageData | null>;
+  /**
+   * Fundo de slide: a página (cor e imagem de fundo dela) com só estas peças
+   * — `alone` sem os filhos (a moldura do Figma), `whole` inteiras (painéis,
+   * ilustrações por baixo do texto).
+   */
+  layers: (pageIndex: number, alone: number[], whole: number[], clip: Box) => Promise<ImageData | null>;
   /** Fundo de página raster: recorte "cover" como no Studio. */
   pageImage: (src: string, w: number, h: number) => Promise<ImageData | null>;
 };
@@ -250,5 +256,31 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
   };
   const paint = (id: number) => capture(id, 'alone');
   const backdrop = (id: number, clip: Box) => capture(id, 'notext', clip);
-  return { image, raster, paint, backdrop, pageImage };
+  const layers = async (pageIndex: number, alone: number[], whole: number[], clip: Box): Promise<ImageData | null> => {
+    signal?.throwIfAborted();
+    await page.evaluate(`(() => {
+      const set = (e, v) => { if (!e.hasAttribute('data-dx-vis')) e.setAttribute('data-dx-vis', e.style.visibility); e.style.visibility = v; };
+      for (const e of document.querySelectorAll('body *')) set(e, 'hidden');
+      const pageEl = document.querySelector('[data-page-index="${pageIndex}"]');
+      if (pageEl) set(pageEl, 'visible');
+      for (const id of ${JSON.stringify(alone)}) { const e = document.querySelector('[data-dx="' + id + '"]'); if (e) set(e, 'visible'); }
+      for (const id of ${JSON.stringify(whole)}) {
+        const e = document.querySelector('[data-dx="' + id + '"]');
+        if (!e) continue;
+        set(e, 'visible');
+        for (const k of e.querySelectorAll('*')) set(k, 'visible');
+      }
+      for (const e of [document.documentElement, document.body]) { e.setAttribute('data-dx-bg', e.style.background); e.style.setProperty('background', 'transparent', 'important'); }
+    })()`);
+    try {
+      const shot = await page.screenshot({ type: 'png', omitBackground: true, captureBeyondViewport: true, clip: { x: clip.x, y: clip.y, width: clip.w, height: clip.h } });
+      return { data: Buffer.from(shot), type: 'png' };
+    } finally {
+      await page.evaluate(`(() => {
+        for (const e of document.querySelectorAll('[data-dx-vis]')) { e.style.visibility = e.getAttribute('data-dx-vis'); e.removeAttribute('data-dx-vis'); }
+        for (const e of [document.documentElement, document.body]) { e.style.removeProperty('background'); e.style.background = e.getAttribute('data-dx-bg') || ''; e.removeAttribute('data-dx-bg'); }
+      })()`);
+    }
+  };
+  return { image, raster, paint, backdrop, pageImage, layers };
 };
