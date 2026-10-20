@@ -271,6 +271,11 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
         for (const k of e.querySelectorAll('*')) set(k, 'visible');
       }
       for (const e of [document.documentElement, document.body]) { e.setAttribute('data-dx-bg', e.style.background); e.style.setProperty('background', 'transparent', 'important'); }
+      // Texto solto direto na moldura vai editável por cima: fora da imagem.
+      const style = document.createElement('style');
+      style.id = 'dx-alone';
+      style.textContent = ${JSON.stringify(alone.map((id) => `[data-dx="${id}"]`).join(', ') || ':not(*)')} + ' { -webkit-text-fill-color: transparent !important; text-decoration-color: transparent !important; text-shadow: none !important; }';
+      document.head.appendChild(style);
     })()`);
     try {
       const shot = await page.screenshot({ type: 'png', omitBackground: true, captureBeyondViewport: true, clip: { x: clip.x, y: clip.y, width: clip.w, height: clip.h } });
@@ -279,6 +284,7 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
       await page.evaluate(`(() => {
         for (const e of document.querySelectorAll('[data-dx-vis]')) { e.style.visibility = e.getAttribute('data-dx-vis'); e.removeAttribute('data-dx-vis'); }
         for (const e of [document.documentElement, document.body]) { e.style.removeProperty('background'); e.style.background = e.getAttribute('data-dx-bg') || ''; e.removeAttribute('data-dx-bg'); }
+        document.getElementById('dx-alone')?.remove();
       })()`);
     }
   };

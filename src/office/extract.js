@@ -502,19 +502,13 @@
     return a ? a.getAttribute('data-block-ref') || a.getAttribute('href') : null;
   };
 
+  /** Filhos; display: contents (agrupamento do Figma) não tem caixa — entram os de dentro. */
+  const kidsOf = (el, link) =>
+    [...el.children].flatMap((c) => (getComputedStyle(c).display === 'contents' ? kidsOf(c, link) : [node(c, link)])).filter(Boolean);
+
   const node = (el, link) => {
     const cs = getComputedStyle(el);
     if (!visible(el, cs)) return null;
-    // display: contents (agrupamento do Figma) não tem caixa: vale o que tem dentro.
-    if (cs.display === 'contents') {
-      const inner = [...el.children].map((c) => node(c, link)).filter(Boolean);
-      if (inner.length <= 1) return inner[0] || null;
-      const x0 = Math.min(...inner.map((k) => k.box.x));
-      const y0 = Math.min(...inner.map((k) => k.box.y));
-      const x1 = Math.max(...inner.map((k) => k.box.x + k.box.w));
-      const y1 = Math.max(...inner.map((k) => k.box.y + k.box.h));
-      return { k: 'box', id: nextId++, box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, abs: false, layout: layoutOf(cs), kids: inner };
-    }
     const b = box(el);
     if (b.w < 0.5 || b.h < 0.5) return null;
     const tag = el.tagName;
@@ -605,7 +599,7 @@
       }
       return n.kids ? { ...n, kids: n.kids.map(clipMedia) } : n;
     };
-    let kids = [...el.children].map((c) => node(c, link)).filter(Boolean);
+    let kids = kidsOf(el, link);
     if (clips && (deco.fill || deco.border)) kids = kids.map((k) => (k.abs && k.k !== 'text' ? clip(k) : k)).filter(Boolean);
     // Grupo que recorta sem cor própria ("Mask group" do Figma): só as imagens.
     else if (clips) kids = kids.map(clipMedia);

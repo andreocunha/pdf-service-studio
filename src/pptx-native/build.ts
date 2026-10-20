@@ -139,8 +139,6 @@ const SLIDENUM_FIELD = '{B6F15528-21DE-4FAA-801E-634DDDAF4B2B}';
 const covers = (b: Box, page: Box) =>
   Math.abs(b.x - page.x) < 2 && Math.abs(b.y - page.y) < 2 && Math.abs(b.w - page.w) < 2 && Math.abs(b.h - page.h) < 2;
 const hasText = (n: LayoutNode): boolean => n.k === 'text' || (n.k === 'box' && n.kids.some(hasText));
-/** Ids no DOM das peças inteiras (caixa sem elemento próprio — display: contents — vale pelos filhos). */
-const domIds = (n: LayoutNode): number[] => (n.k === 'box' && n.layout.display === 'contents' ? n.kids.flatMap(domIds) : [n.id]);
 
 export const buildDeck = async ({ layout, fonts, assets, background }: BuildInput): Promise<Deck> => {
   /**
@@ -169,9 +167,10 @@ export const buildDeck = async ({ layout, fonts, assets, background }: BuildInpu
         layers.push(kid);
       }
       const top = frames[frames.length - 1];
-      const plain = frames.length === 1 && !layers.length && !top.paint && !top.bgImage && !top.fillRaw && top.fill && !page.bgImage;
+      // Cor lisa (sem borda, sombra, canto): vira a cor do slide; o resto, imagem.
+      const plain = frames.length === 1 && !layers.length && top.fill && !top.paint && !top.bgImage && !top.fillRaw && !top.border && !top.shadow && !top.radius && !page.bgImage;
       if (plain) return { frames, layers, color: top.fill!, image: null };
-      const image = await assets.layers(page.index, frames.map((f) => f.id), layers.flatMap(domIds), page.box);
+      const image = await assets.layers(page.index, frames.map((f) => f.id), layers.map((l) => l.id), page.box);
       if (image) return { frames, layers, color: null, image };
     }
     return null;
