@@ -70,6 +70,8 @@ type RunIR =
 type PIR = {
   kind: 'p';
   runs: RunIR[];
+  /** Parte do espaço antes que só compensa o corte do Word em cima da linha apertada (no topo de célula o Word não corta). */
+  tight?: number;
   align?: 'left' | 'center' | 'right' | 'both';
   indentLeft?: number;
   indentRight?: number;
@@ -104,6 +106,8 @@ type CellIR = {
   /** Arte atrás do conteúdo (banner com gradiente/ilustração): imagem ancorada na célula, atrás do texto. */
   backdrop?: { image: ImageData; w: number; h: number; x?: number; y?: number; front?: boolean; center?: boolean };
   fill?: string;
+  /** Fiapo encostado num card pintado: a cor dele se ninguém (a caixa de fora) pintar antes. */
+  notch?: string;
   borders?: Partial<Record<'top' | 'right' | 'bottom' | 'left', { w: number; color: string }>>;
   margins?: [number, number, number, number];
   vAlign?: 'top' | 'center' | 'bottom';
@@ -231,12 +235,23 @@ const isEmptyP = (k: OutIR) => k.kind === 'p' && !k.runs.length && !k.numbering 
 const painted = (c: CellIR) => Boolean(c.fill || c.backdrop || c.borders);
 const filler = (width: number): CellIR => ({ width, children: [] });
 
-/** Encosta `w` px de espaço vazio num lado da linha: alarga a célula da ponta se ela não tem pintura, senão célula vazia. */
-const padRow = (cells: CellIR[], w: number, side: 'left' | 'right') => {
+/**
+ * Encosta `w` px de espaço vazio num lado da linha: alarga a célula da ponta
+ * se ela não tem pintura, senão célula vazia (com a cor de fora, `fill`).
+ */
+const padRow = (cells: CellIR[], w: number, side: 'left' | 'right', fill?: string) => {
   if (w < 0.5) return;
   const edge = side === 'left' ? cells[0] : cells[cells.length - 1];
-  // Poucos px: alarga a própria célula da ponta (mesmo pintada) — uma
-  // célula-fiapo sem cor deixava um recorte branco no canto do card.
+  // Poucos px: uma célula-fiapo sem cor deixava um recorte branco no canto
+  // do card — ela leva a cor da ponta como reserva (`notch`), e a caixa de
+  // fora, se tiver cor, pinta por cima (a moldura azul em volta do miolo
+  // branco). Ponta com borda: alarga a própria célula (a borda segue inteira).
+  if (edge && !edge.vmerge && painted(edge) && w < 6 && !edge.borders?.[side] && edge.fill) {
+    const notch: CellIR = { width: w, notch: edge.fill, fill: fill && fill !== edge.fill ? fill : undefined, children: [] };
+    if (side === 'left') cells.unshift(notch);
+    else cells.push(notch);
+    return;
+  }
   if (edge && !edge.vmerge && (!painted(edge) || w < 6)) {
     const m = edge.margins ?? [0, 0, 0, 0];
     m[side === 'left' ? 3 : 1] += w;
@@ -298,8 +313,8 @@ const flattenGrid = (t: TIR): TIR => {
     const right = c.width - left - x.width;
     x.rows.forEach((xr, r) => {
       const cells = xr.cells.map((k) => ({ ...k, margins: k.margins ? [...k.margins] as CellIR['margins'] : undefined }));
-      padRow(cells, left, 'left');
-      padRow(cells, right, 'right');
+      padRow(cells, left, 'left', c.fill);
+      padRow(cells, right, 'right', c.fill);
       rows[r].cells.push(...cells);
     });
   });
@@ -324,12 +339,19 @@ const unwrap = (t: TIR): TIR => {
   const gapOf = (ks: OutIR[]) => ks.reduce((a, k) => a + (k.kind === 'p' && k.spacer !== undefined ? k.spacer : 0), 0);
   const [mt0, , mb0, ml] = outer.margins ?? [0, 0, 0, 0];
   const mt = mt0 + gapOf(outer.children.slice(0, at));
-  const mb = mb0 + gapOf(outer.children.slice(at + 1));
+  let mb = mb0 + gapOf(outer.children.slice(at + 1));
+  // Sobra fina embaixo de um miolo de outra cor (o branco dentro do card
+  // azul, 4px antes da borda): vira linha da cor de fora — esticar o miolo
+  // apagava a moldura de baixo. Sobra grande é só espaço (o fim do slide):
+  // fica na última linha, que cresce se o Word desenhar mais alto.
+  const lastIn = inner.rows[inner.rows.length - 1];
+  const tail = (t.rows[0].height ?? 0) - mt - mb - inner.rows.reduce((a, r) => a + (r.height ?? 0), 0);
+  if (tail >= 1 && tail <= 16 && outer.fill && inner.rows.length > 1 && lastIn.cells.some((c) => c.fill && c.fill !== outer.fill)) mb += tail;
   const b = outer.borders ?? {};
   const rows = inner.rows.map((r, ri) => {
     const cells = r.cells.map((c) => ({ ...c, margins: c.margins ? ([...c.margins] as CellIR['margins']) : undefined, fill: c.fill ?? outer.fill }));
-    padRow(cells, ml + inner.indent, 'left');
-    padRow(cells, outer.width - ml - inner.indent - inner.width, 'right');
+    padRow(cells, ml + inner.indent, 'left', outer.fill);
+    padRow(cells, outer.width - ml - inner.indent - inner.width, 'right', outer.fill);
     for (const c of cells) if (!c.fill && outer.fill) c.fill = outer.fill;
     const first = ri === 0;
     const last = ri === inner.rows.length - 1;
@@ -351,12 +373,12 @@ const unwrap = (t: TIR): TIR => {
   // Grade de várias linhas (composição do Figma): o espaço interno da caixa
   // de fora vira uma linha vazia em cima e outra embaixo — somado à primeira
   // linha, esticava junto as peças mescladas dela (os quadrados da "soma").
+  const padRowOf = (h: number, side: 'top' | 'bottom'): TIRRow => ({
+    height: h,
+    exact: true,
+    cells: [{ width: outer.width, fill: outer.fill, borders: { left: b.left, right: b.right, ...(side === 'top' ? { top: b.top } : { bottom: b.bottom }) }, children: [] }],
+  });
   if (inner.rows.length > 1 && (mt >= 1 || mb >= 1)) {
-    const padRowOf = (h: number, side: 'top' | 'bottom'): TIRRow => ({
-      height: h,
-      exact: true,
-      cells: [{ width: outer.width, fill: outer.fill, borders: { left: b.left, right: b.right, ...(side === 'top' ? { top: b.top } : { bottom: b.bottom }) }, children: [] }],
-    });
     for (const [ri, r] of rows.entries()) {
       for (const c of r.cells) {
         if (ri === 0 && c.borders) delete c.borders.top;
@@ -390,9 +412,24 @@ const inlineCells = (t: TIR): TIR => {
     for (const c of row.cells) {
       const real = c.children.filter((k) => !(k.kind === 'p' && (k.spacer !== undefined || isEmptyP(k)) && !k.bookmark));
       const inner = real.length === 1 && real[0].kind === 't' && real[0].rows.length === 1 ? real[0] : null;
+      // Tabelinha pintada mais baixa que a linha (etiqueta branca de 30px ao
+      // lado de um título de 59px): fica aninhada, do tamanho dela — a cor
+      // passada pra célula de fora pintava a linha inteira.
+      const tall = (x: TIR) => {
+        if (!x.rows[0].cells.some(painted)) return true;
+        const gaps = c.children.reduce((a, k) => a + (k.kind === 'p' && k.spacer !== undefined ? k.spacer : 0), 0);
+        const own = (c.margins?.[0] ?? 0) + (c.margins?.[2] ?? 0) + gaps;
+        return !row.height || !x.rows[0].height || Math.abs(row.height - own - x.rows[0].height) <= 2;
+      };
+      if (inner && !tall(inner)) {
+        cells.push(c);
+        continue;
+      }
+      // Pintada e bem mais estreita que a célula (a etiqueta): não passa a cor pra célula toda.
+      const wide = (x: TIR) => !x.rows[0].cells.some(painted) || x.width >= 0.9 * (c.width - (c.margins?.[1] ?? 0) - (c.margins?.[3] ?? 0));
       // Tabelinha 1×1 (a bola da seta na coluna do meio, mesclada): o conteúdo
       // e a arte passam pra própria célula.
-      if (inner && inner.rows[0].cells.length === 1 && !painted(c) && !inner.rows[0].cells[0].vmerge) {
+      if (inner && inner.rows[0].cells.length === 1 && !painted(c) && !inner.rows[0].cells[0].vmerge && wide(inner)) {
         const ic = inner.rows[0].cells[0];
         const at = c.children.indexOf(inner);
         const before = c.children.slice(0, at).reduce((a, k) => a + (k.kind === 'p' && k.spacer !== undefined ? k.spacer : 0), 0);
@@ -417,8 +454,8 @@ const inlineCells = (t: TIR): TIR => {
       const mb = mb0 + gapOf(c.children.slice(at + 1));
       const b = c.borders ?? {};
       const got = inner.rows[0].cells.map((k) => ({ ...k, margins: k.margins ? ([...k.margins] as CellIR['margins']) : undefined, fill: k.fill ?? c.fill }));
-      padRow(got, ml + inner.indent, 'left');
-      padRow(got, c.width - ml - inner.indent - inner.width, 'right');
+      padRow(got, ml + inner.indent, 'left', c.fill);
+      padRow(got, c.width - ml - inner.indent - inner.width, 'right', c.fill);
       got.forEach((k, ki) => {
         if (!k.fill && c.fill) k.fill = c.fill;
         const m = k.margins ?? [0, 0, 0, 0];
@@ -1020,19 +1057,30 @@ const manualClause = (node: Extract<LayoutNode, { k: 'text' }>, p: PIR, ctx: Ctx
 };
 
 /**
- * Linha única com entrelinha do Studio maior que a da fonte ("15" de 24px
- * numa linha de 54px): o navegador divide a sobra metade em cima, metade
+ * Linha única. Entrelinha do Studio maior que a da fonte ("15" de 24px numa
+ * linha de 54px): o navegador divide a sobra metade em cima, metade
  * embaixo; em Múltiplos o Word põe toda embaixo e o texto sobe. Então:
- * Simples + a sobra como espaço antes/depois. Texto de várias linhas segue
- * em Múltiplos (a sobra também vai entre as linhas).
+ * Simples + a sobra como espaço antes/depois.
+ * Mais apertada que a fonte (título de 80px numa linha de 73px): Múltiplos
+ * com o fator exato — em Simples a linha crescia ~30% e empurrava a página.
+ * O navegador corta metade do aperto em cima; o Word, em Múltiplos < 1, corta
+ * mais (encolhe a subida da letra junto): a linha desce 1/4 do aperto, como
+ * espaço antes (medido no Word, fonte com as métricas iguais no Mac e no
+ * Windows). Linha empilhada embaixo de outra igual (título do Figma, um
+ * texto por linha): a distância entre as linhas é a do desenho.
+ * Texto de várias linhas segue em Múltiplos (a sobra vai entre as linhas).
  */
-const oneLineSpacing = (para: Para, face: Face | null, wrapped: boolean): Pick<PIR, 'line' | 'spaceBefore' | 'spaceAfter'> => {
+const oneLineSpacing = (para: Para, face: Face | null, wrapped: boolean): Pick<PIR, 'line' | 'spaceBefore' | 'spaceAfter' | 'tight'> => {
   const line = lineOf(para, face);
   if (wrapped || !line || line.value === 240 || !para.lineHeight || para.runs.some((r) => r.br)) return { line };
-  // Uma linha mais apertada que a fonte: Simples (Múltiplos < 1 corta o espaço
-  // de cima e o texto sobe — o "15" do calendário).
-  if (line.value < 240) return { line: { value: 240, rule: 'auto' } };
-  const half = (para.lineHeight - (face?.lineHeight ?? 1.2) * para.fontSize) / 2;
+  const natural = (face?.lineHeight ?? 1.2) * para.fontSize;
+  const step = stacked.get(para);
+  if (line.value < 240 || step) {
+    const value = Math.round((240 * (step ?? para.lineHeight)) / natural);
+    const cut = step ? 0 : (natural - para.lineHeight) / 4;
+    return { line: { value, rule: 'auto' }, spaceBefore: cut || undefined, tight: cut || undefined };
+  }
+  const half = (para.lineHeight - natural) / 2;
   return { line: { value: 240, rule: 'auto' }, spaceBefore: half, spaceAfter: half };
 };
 
@@ -1574,13 +1622,18 @@ const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids
   const only = real.length === 1 && real[0].kind === 't' && real[0].rows.length === 1 ? real[0] : null;
   if (only && paint.fill && !paint.backdrop && !paint.borders) {
     const cells = only.rows[0].cells.map((c) => ({ ...c, fill: c.fill ?? (c.backdrop ? undefined : paint.fill) }));
-    padRow(cells, pad[3] + only.indent, 'left');
-    padRow(cells, n.box.w - pad[3] - only.indent - only.width, 'right');
+    padRow(cells, pad[3] + only.indent, 'left', paint.fill);
+    padRow(cells, n.box.w - pad[3] - only.indent - only.width, 'right', paint.fill);
     // Faixas das pontas que viraram célula vazia também levam o fundo.
     for (const c of cells) if (!c.fill && !c.backdrop && !c.children.length) c.fill = paint.fill;
+    // Vão antes da linha (texto no meio de uma faixa sem padding, do Figma)
+    // vira margem de cima — sem isso o texto subia pro topo. O de baixo já
+    // está na altura da linha (somar de novo esticava o card).
+    const at = children.indexOf(only);
+    const before = children.slice(0, at).reduce((a, k) => a + (k.kind === 'p' && k.spacer !== undefined ? k.spacer : 0), 0);
     for (const c of cells) {
       const m = c.margins ?? [0, 0, 0, 0];
-      c.margins = [m[0] + pad[0], m[1], m[2] + pad[2], m[3]];
+      c.margins = [m[0] + pad[0] + before, m[1], m[2] + pad[2], m[3]];
     }
     return { kind: 't', width: n.box.w, indent: n.box.x - region.x, rows: [{ height: n.box.h, cells }] };
   }
@@ -1915,12 +1968,32 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
   return [{ kind: 't', width: xs[nc] - L, indent: L - region.x, rows }];
 };
 
+/**
+ * Linhas de uma linha só, uma embaixo da outra, mesmo estilo e mais
+ * apertadas que a fonte (título "Guia de / conduta com / terceiros" do Figma,
+ * um texto por linha): guarda a distância até a de cima — o Figma às vezes
+ * encosta mais que a entrelinha, e é ela que vale entre as linhas.
+ */
+const stacked = new WeakMap<Para, number>();
+const markStacks = (texts: LayoutNode[]) => {
+  const ts = texts.filter((t): t is Extract<LayoutNode, { k: 'text' }> => t.k === 'text' && isOneLine(t) && !t.autonumber).sort((a, b) => a.box.y - b.box.y);
+  for (let i = 1; i < ts.length; i++) {
+    const [a, b] = [ts[i - 1], ts[i]];
+    const [pa, pb] = [a.paras[0], b.paras[0]];
+    const lh = pb.lineHeight;
+    const same = lh && pa.lineHeight === lh && pa.fontSize === pb.fontSize && pa.align === pb.align && Math.min(right(a.box), right(b.box)) > Math.max(a.box.x, b.box.x) && lh < pb.fontSize * 1.1;
+    const step = b.box.y - a.box.y;
+    if (same && Math.abs(step - lh) <= 0.15 * lh) stacked.set(pb, step);
+  }
+};
+
 const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<OutIR[]> => {
   const grid = await gridCompose(tree, region, ctx);
   if (grid) return grid;
   const texts: LayoutNode[] = [];
   const collect = (n: LayoutNode) => (n.k === 'text' ? texts.push(n) : n.k === 'box' ? n.kids.forEach(collect) : undefined);
   collect(tree);
+  markStacks(texts);
   // Área de tudo que o bloco desenha — peça solta pode vazar da caixa (a
   // ponta da barra da linha do tempo).
   const all: LayoutNode[] = [];
@@ -2169,6 +2242,24 @@ const toTable = (t: TIR): Table => {
             const centered = cell.vAlign === 'center' && (!cell.backdrop || artCentered);
             const [mt, , mb] = centered ? [0, 0, 0] : cell.margins ?? [0, 0, 0, 0];
             let items = cell.children;
+            // Linha apertada dentro de célula: aqui o Word não corta o aperto
+            // em cima (no corpo corta) — a letra fica onde ficaria em Simples,
+            // metade do aperto abaixo do Studio. Sai do espaço que vem antes
+            // (o do parágrafo, depois o espaçador de cima).
+            items = items.map((k) => (k.kind === 'p' && k.tight ? { ...k } : k));
+            items.forEach((k, i) => {
+              if (k.kind !== 'p' || !k.tight) return;
+              let excess = 3 * k.tight; // a compensação (1/4) + metade do aperto (2/4)
+              const own = Math.min(excess, k.spaceBefore ?? 0);
+              k.spaceBefore = (k.spaceBefore ?? 0) - own;
+              excess -= own;
+              const prev = items[i - 1];
+              if (excess > 0.5 && prev?.kind === 'p' && prev.spacer !== undefined && !prev.runs.length) {
+                const cut = Math.min(excess, Math.max(0, prev.spacer - 1));
+                items[i - 1] = { ...prev, ...spacer(prev.spacer - cut) };
+              }
+              k.tight = undefined;
+            });
             if (centered) {
               items = items.filter((k, i) => !(k.kind === 'p' && k.spacer !== undefined && (i === 0 || i === items.length - 1) && !k.bookmark));
               // Só nas pontas da célula: o espaço entre uma tabela e o texto
@@ -2195,7 +2286,7 @@ const toTable = (t: TIR): Table => {
               width: { size: tw(cell.width), type: WidthType.DXA },
               ...(span > 1 ? { columnSpan: span } : {}),
               ...(cell.vmerge ? { verticalMerge: cell.vmerge === 'restart' ? VerticalMergeType.RESTART : VerticalMergeType.CONTINUE } : {}),
-              shading: cell.fill ? { fill: cell.fill, color: 'auto', type: 'clear' as never } : undefined,
+              shading: cell.fill ?? cell.notch ? { fill: (cell.fill ?? cell.notch)!, color: 'auto', type: 'clear' as never } : undefined,
               margins: cell.margins
                 ? { top: 0, right: tw(cell.margins[1]), bottom: 0, left: tw(cell.margins[3]), marginUnitType: WidthType.DXA }
                 : undefined,
@@ -2311,7 +2402,11 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   // Seção nova quando o cabeçalho muda: fundo (capa, sumário, abertura de
   // capítulo — com quebra de página) ou aba ativa do menu (guia da Lex: uma
   // seção por tópico do menu, contínua).
-  const bgKey = (i: number) => (coverPages.has(i) ? `cover:${i}` : layout.pages[i]?.bgImage ?? 'none');
+  const bgKey = (i: number) => {
+    const p = layout.pages[i];
+    if (coverPages.has(i)) return `cover:${i}`;
+    return p?.bgImage ?? (p?.bgColor && p.bgColor !== 'ffffff' ? `color:${p.bgColor}` : 'none');
+  };
   const groups: { pages: number[]; key: string; bg: string }[] = [];
   for (const p of layout.pages) {
     const bg = bgKey(p.index);
@@ -2431,6 +2526,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         else if (n.k === 'box') n.kids.forEach(collect);
       };
       blocks.forEach((b) => collect(b.tree));
+      markStacks(texts);
       if (texts.length) {
         const top = pageTop(group.pages[0]);
         body.push(...(await renderRegion(texts, { x: pad.left, y: top + marginTop, w: pageW - pad.left - pad.right, h: pageH }, ctx)));

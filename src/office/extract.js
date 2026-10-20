@@ -502,9 +502,19 @@
     return a ? a.getAttribute('data-block-ref') || a.getAttribute('href') : null;
   };
 
-  /** Filhos; display: contents (agrupamento do Figma) não tem caixa — entram os de dentro. */
-  const kidsOf = (el, link) =>
-    [...el.children].flatMap((c) => (getComputedStyle(c).display === 'contents' ? kidsOf(c, link) : [node(c, link)])).filter(Boolean);
+  /**
+   * Filhos. Sem caixa própria — display: contents, ou caixa de altura zero
+   * que não recorta (a linha de 1px do Figma mora num div de altura 0) —
+   * entram os de dentro.
+   */
+  const hollow = (el) => {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'contents') return visible(el, cs);
+    if (!visible(el, cs) || cs.overflow !== 'visible' || !el.children.length) return false;
+    const r = el.getBoundingClientRect();
+    return r.width < 0.5 || r.height < 0.5;
+  };
+  const kidsOf = (el, link) => [...el.children].flatMap((c) => (hollow(c) ? kidsOf(c, link) : [node(c, link)])).filter(Boolean);
 
   const node = (el, link) => {
     const cs = getComputedStyle(el);

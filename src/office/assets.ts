@@ -202,6 +202,8 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
    * pintura da própria caixa, sem os filhos; `notext`: tudo menos o texto
    * (bloco complexo — o texto vai editável por cima da captura).
    */
+  /** Área da captura com pelo menos 1px (a linha de 1px do Figma escalada fica com 0,55px e o Chrome recusa). */
+  const shotArea = (b: Box) => ({ x: b.x, y: b.y, width: Math.max(1, b.w), height: Math.max(1, b.h) });
   const capture = async (id: number, mode: 'all' | 'alone' | 'notext', clip?: Box): Promise<ImageData | null> => {
     signal?.throwIfAborted();
     const alone = mode === 'alone';
@@ -233,7 +235,7 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
     try {
       const data = Buffer.from(
         clip
-          ? await page.screenshot({ type: 'png', omitBackground: true, captureBeyondViewport: true, clip: { x: clip.x, y: clip.y, width: clip.w, height: clip.h } })
+          ? await page.screenshot({ type: 'png', omitBackground: true, captureBeyondViewport: true, clip: shotArea(clip) })
           : await el.screenshot({ type: 'png', omitBackground: true }),
       );
       return { data, type: 'png' as const };
@@ -278,7 +280,7 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
       document.head.appendChild(style);
     })()`);
     try {
-      const shot = await page.screenshot({ type: 'png', omitBackground: true, captureBeyondViewport: true, clip: { x: clip.x, y: clip.y, width: clip.w, height: clip.h } });
+      const shot = await page.screenshot({ type: 'png', omitBackground: true, captureBeyondViewport: true, clip: shotArea(clip) });
       return { data: Buffer.from(shot), type: 'png' };
     } finally {
       await page.evaluate(`(() => {
