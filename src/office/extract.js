@@ -256,8 +256,11 @@
     const pad = ['Top', 'Right', 'Bottom', 'Left'].map((s) => len(el, cs[`padding${s}`]));
     if (pad.some((v) => v > 0)) d.pad = pad;
     // Raio (o maior canto): círculo pequeno com ícone/texto vai como imagem redonda.
-    const radius = Math.max(...['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => len(el, cs[`border${c}Radius`])));
+    const corners = ['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((c) => len(el, cs[`border${c}Radius`]));
+    const radius = Math.max(...corners);
     if (radius > 0.5) d.radius = radius;
+    // Cantos diferentes (só os de baixo arredondados): o Word não tem forma pra isso.
+    if (radius > 0.5 && Math.min(...corners) < radius - 1) d.uneven = true;
     // Sombra: o Word ignora (o fundo vai no preenchimento da tabela); o PowerPoint desenha.
     return d;
   };

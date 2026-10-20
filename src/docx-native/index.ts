@@ -5,6 +5,7 @@
  */
 import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from 'fflate';
 import { Packer } from 'docx';
+import { roundShapes } from './round.js';
 
 import { embedFonts } from '../docx-fonts.js';
 import { deflateSync } from 'node:zlib';
@@ -102,7 +103,7 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
       return art ?? (color && color !== 'ffffff' ? solidPng(color) : null);
     };
 
-    const { doc, used, pageOffsets } = await buildDocument({ layout, fonts, assets, background, coverPages: covers });
+    const { doc, used, pageOffsets, rounds } = await buildDocument({ layout, fonts, assets, background, coverPages: covers });
     args.signal?.throwIfAborted();
     const packed = await Packer.toBuffer(doc);
     const files = unzipSync(new Uint8Array(packed)) as Zippable;
@@ -119,7 +120,7 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
     // linha, numa página cheia ele caía na folha seguinte — e a página nova
     // ficava com o cabeçalho da seção anterior.
     files['word/document.xml'] = strToU8(
-      strFromU8(files['word/document.xml'] as Uint8Array).replace(
+      roundShapes(strFromU8(files['word/document.xml'] as Uint8Array), rounds).replace(
         /<w:p><w:pPr><w:sectPr/g,
         '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/><w:szCs w:val="2"/></w:rPr><w:sectPr',
       ),
