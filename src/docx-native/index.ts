@@ -125,6 +125,14 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
       ),
     );
     for (const path of Object.keys(files).filter((p) => /^word\/(document|header\d+|footer\d+)\.xml$/.test(p))) {
+      // Sombra do texto (título com a cópia deslocada em outra cor): efeito de
+      // texto do Word, no fim do rPr (os w14 vêm depois dos w:).
+      files[path] = strToU8(strFromU8(files[path] as Uint8Array).replace(
+        /<w:rStyle w:val="LexShadow-(\d+)-(\d+)-(\d+)-([0-9a-f]{6})-(\d+)"\/>([\s\S]*?)<\/w:rPr>/g,
+        (_, dist, dir, blur, color, alpha, rest) =>
+          `${rest}<w14:shadow w14:blurRad="${blur}" w14:dist="${dist}" w14:dir="${dir}" w14:sx="100000" w14:sy="100000" w14:kx="0" w14:ky="0" w14:algn="tl">` +
+          `<w14:srgbClr w14:val="${color.toUpperCase()}">${Number(alpha) ? `<w14:alpha w14:val="${Number(alpha) * 1000}"/>` : ''}</w14:srgbClr></w14:shadow></w:rPr>`,
+      ));
       // Ordem de empilhamento pela ordem no documento: o fundo do card de fora
       // vem antes e fica embaixo do de dentro (a lib docx usa a altura da
       // imagem como ordem — a caixa maior cobria a menor).

@@ -50,6 +50,8 @@ export type Run = {
   collapse?: boolean;
   /** Onde começa cada linha nova no Studio (índice no texto). */
   breaks?: number[];
+  /** text-shadow (px, já na escala). */
+  shadow?: { x: number; y: number; blur: number; color: string; alpha: number };
 };
 export type Para = {
   align: 'left' | 'center' | 'right' | 'both';
@@ -104,6 +106,8 @@ export type LayoutNode =
       autonumberBox?: Box | null;
       /** Vão entre o número e o texto que vem depois dele na mesma linha (px). */
       autonumberGap?: number | null;
+      /** Fundo do próprio número (selo), quando opaco. */
+      autonumberFill?: { color: string; box: Box } | null;
     } & Deco)
   | { k: 'img'; id: number; box: Box; src: string; abs?: boolean; radius?: number; clip?: Box }
   | { k: 'raster'; id: number; box: Box; abs?: boolean; clip?: Box }

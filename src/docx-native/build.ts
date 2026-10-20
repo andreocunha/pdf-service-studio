@@ -63,6 +63,7 @@ const emu = (px: number) => Math.round(px * 9525);
 // Representação intermediária (mutável; vira docx no fim)
 // ---------------------------------------------------------------------------
 
+type Stroke = { w: number; color: string; style?: 'dashed' | 'dotted' };
 type RunIR =
   | { kind: 'text'; text: string; run: Run; face: Face | null; spacing?: number }
   | { kind: 'br' }
@@ -82,8 +83,8 @@ type PIR = {
   line?: { value: number; rule: 'auto' | 'exact' | 'atLeast' };
   numbering?: { ref: string; level: number; instance?: number };
   bookmark?: string;
-  borderBottom?: { w: number; color: string };
-  borderTop?: { w: number; color: string };
+  borderBottom?: Stroke;
+  borderTop?: Stroke;
   pageBreakBefore?: boolean;
   /** Formatação da marca de parágrafo — é dela que o número automático herda a fonte. */
   mark?: { run: Run; face: Face | null };
@@ -108,7 +109,7 @@ type CellIR = {
   fill?: string;
   /** Fiapo encostado num card pintado: a cor dele se ninguém (a caixa de fora) pintar antes. */
   notch?: string;
-  borders?: Partial<Record<'top' | 'right' | 'bottom' | 'left', { w: number; color: string }>>;
+  borders?: Partial<Record<'top' | 'right' | 'bottom' | 'left', Stroke>>;
   margins?: [number, number, number, number];
   vAlign?: 'top' | 'center' | 'bottom';
   /** Mesclagem vertical: começa aqui / continua a de cima. */
@@ -161,7 +162,7 @@ const right = (b: Box) => b.x + b.w;
 const decorated = (n: LayoutNode) =>
   (n.k === 'box' || n.k === 'text') && Boolean((n as { fill?: string }).fill || (n as { border?: object }).border || (n as { paint?: boolean }).paint);
 
-type Decorated = { id: number; box: Box; fill?: string; border?: CellIR['borders']; paint?: boolean };
+type Decorated = { id: number; box: Box; fill?: string; border?: CellIR['borders']; paint?: boolean; shadow?: { x: number; y: number; blur: number; spread: number; color: string; alpha: number }[] };
 
 /**
  * Como a caixa se pinta no Word: sempre no preenchimento/borda da própria
@@ -175,6 +176,13 @@ const paintOf = async (n: Decorated, margins: number[], ctx: Ctx): Promise<Parti
   if (n.paint) {
     const image = await ctx.assets.paint(n.id);
     if (image) return { backdrop: { image, w: n.box.w, h: n.box.h, x: -(margins[3] ?? 0), y: 0 } };
+  }
+  // Sombra sólida deslocada (card "carimbado", sem desfoque): borda grossa
+  // da cor dela à direita e embaixo — célula não tem sombra, e tabela
+  // embrulhando o card fere o padrão de uma tabela por estrutura.
+  const hard = n.shadow?.length === 1 ? n.shadow[0] : undefined;
+  if (n.fill && hard && hard.blur < 0.5 && hard.spread < 0.5 && hard.alpha > 0.99 && hard.x >= 1 && hard.y >= 1 && hard.x <= 8 && hard.y <= 8) {
+    return { fill: n.fill, borders: { ...n.border, right: { w: hard.x, color: hard.color }, bottom: { w: hard.y, color: hard.color } } };
   }
   return { fill: n.fill, borders: n.border };
 };
@@ -1144,6 +1152,13 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
     const level = node.autonumber.split('.').filter(Boolean).length - 1;
     const target = out[0] ?? { kind: 'p', runs: [] };
     if (!out.length) out.push(target);
+    // Selo do número (fundo escuro no próprio número, sem caixa em volta):
+    // sombreamento do parágrafo, que só tem o número.
+    if (node.autonumberFill && !target.runs.some((r) => r.kind === 'text' && r.text.trim())) {
+      target.shade = node.autonumberFill.color;
+      target.align = 'center';
+      target.line = { value: tw(node.autonumberFill.box.h), rule: 'exact' };
+    }
     // O número é do Word (lista multinível), não texto: a próxima cláusula
     // criada no Word já sai numerada, com a cara do selo (a numeração herda a
     // formatação da marca de parágrafo).
@@ -1183,7 +1198,7 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
       if (sp !== undefined) run.letterSpacing = sp / 15;
       if (face) ctx.used.add(face);
       target.mark = { run, face };
-      if (!target.runs.length && style.lineHeight) {
+      if (!target.runs.length && style.lineHeight && !target.shade) {
         target.line = lineOf({ lineHeight: style.lineHeight, fontSize: style.size, align: 'left', runs: [] }, face);
       }
     }
@@ -1311,6 +1326,31 @@ const renderRegion = async (nodes: LayoutNode[], region: Box, ctx: Ctx): Promise
   return out;
 };
 
+/**
+ * Selo pequeno (círculo com um número, ≤64px e até 3 letras): vai como uma
+ * imagem só, na frente, na linha do texto. Com a arte atrás do texto, o
+ * fundo da célula do card cobria o círculo e sobrava o número solto (branco
+ * no claro, invisível).
+ */
+const sealOf = async (nodes: LayoutNode[], box: Box, region: Box, ctx: Ctx): Promise<PIR | null> => {
+  if (box.w > 64 || box.h > 64) return null;
+  const inside = nodes.flatMap((n) => leaves([n])).filter((n) => contains(box, n.box));
+  const texts = inside.flatMap(everyNode).filter((n): n is Extract<LayoutNode, { k: 'text' }> => n.k === 'text');
+  const chars = texts.reduce((a, t) => a + t.paras.flatMap((p) => p.runs).reduce((b, r) => b + (r.t?.trim().length ?? 0), 0), 0);
+  if (!texts.length || chars > 3) return null;
+  // Pelas caixas também: texto solto direto numa caixa não tem elemento próprio.
+  const whole = nodes.flatMap(everyNode).filter((n) => contains(box, n.box)).map((n) => n.id);
+  const image = await ctx.assets.layers(-1, [], whole, box);
+  if (!image) return null;
+  return {
+    kind: 'p',
+    runs: [{ kind: 'img', image, w: box.w, h: box.h }],
+    indentLeft: Math.max(0, box.x - region.x),
+    line: { value: tw(box.h), rule: 'atLeast' },
+    tiny: true,
+  };
+};
+
 const renderBand = async (band: LayoutNode[], region: Box, ctx: Ctx): Promise<OutIR[]> => {
   // Arte (imagem/raster) que cobre outros itens é o fundo deles: célula com a
   // imagem atrás do texto, e o conteúdo por cima continua editável.
@@ -1318,6 +1358,11 @@ const renderBand = async (band: LayoutNode[], region: Box, ctx: Ctx): Promise<Ou
     (n) => (n.k === 'img' || n.k === 'raster') && band.some((o) => o !== n && hasText(o) && contains(n.box, o.box)),
   );
   if (backdrop && (backdrop.k === 'img' || backdrop.k === 'raster')) {
+    const seal = await sealOf(band, backdrop.box, region, ctx);
+    if (seal) {
+      const rest = band.filter((o) => !contains(backdrop.box, o.box));
+      return rest.length ? [seal, ...(await renderRegion(rest, region, ctx))] : [seal];
+    }
     const image = backdrop.k === 'img' ? await ctx.assets.image(backdrop.src, backdrop.box.w, backdrop.box.h) : await ctx.assets.raster(backdrop.id, backdrop.box);
     const inside = band.filter((o) => o !== backdrop && contains(backdrop.box, o.box));
     const outside = band.filter((o) => o !== backdrop && !inside.includes(o));
@@ -2011,6 +2056,8 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
   // transborda pro bloco de baixo, como no Studio); a linha da tabela fica
   // com a altura do conteúdo.
   const shot = { ...area, h: Math.max(area.h, Math.ceil(bottom(u)) - y) };
+  const seal = await sealOf([tree], shot, region, ctx);
+  if (seal) return [seal];
   const image = await ctx.assets.backdrop(tree.id, shot);
   // Sem a captura: só o texto (o bloco inteiro voltaria pra cá — laço sem fim
   // até estourar a memória).
@@ -2064,7 +2111,17 @@ const runProps = (run: Run, face: Face | null) => ({
   characterSpacing: run.letterSpacing ? Math.round(run.letterSpacing * 15) : undefined,
   superScript: run.verticalAlign === 'super' || undefined,
   subScript: run.verticalAlign === 'sub' || undefined,
+  // Sombra do texto: a lib docx não tem w14:shadow — vai como estilo-marcador
+  // que o index.ts troca pelo efeito de verdade.
+  style: run.shadow ? shadowMark(run.shadow) : undefined,
 });
+
+/** Marcador da sombra: distância e direção em EMU / 60000 avos de grau, desfoque, cor, transparência %. */
+const shadowMark = (s: NonNullable<Run['shadow']>) => {
+  const dist = Math.round(Math.hypot(s.x, s.y) * 9525);
+  const dir = Math.round((((Math.atan2(s.y, s.x) * 180) / Math.PI + 360) % 360) * 60000);
+  return `LexShadow-${dist}-${dir}-${Math.round(s.blur * 9525)}-${s.color}-${Math.round((1 - s.alpha) * 100)}`;
+};
 
 /**
  * Indicador oculto ("_" na frente: fica fora da lista "Indicadores" do Word),
@@ -2133,8 +2190,8 @@ const toParagraph = (p: PIR): Paragraph => {
     border:
       p.borderBottom || p.borderTop
         ? {
-            ...(p.borderBottom ? { bottom: { style: BorderStyle.SINGLE, size: Math.max(2, Math.round(p.borderBottom.w * 6)), color: p.borderBottom.color, space: 0 } } : {}),
-            ...(p.borderTop ? { top: { style: BorderStyle.SINGLE, size: Math.max(2, Math.round(p.borderTop.w * 6)), color: p.borderTop.color, space: 0 } } : {}),
+            ...(p.borderBottom ? { bottom: { style: strokeStyle(p.borderBottom), size: Math.max(2, Math.round(p.borderBottom.w * 6)), color: p.borderBottom.color, space: 0 } } : {}),
+            ...(p.borderTop ? { top: { style: strokeStyle(p.borderTop), size: Math.max(2, Math.round(p.borderTop.w * 6)), color: p.borderTop.color, space: 0 } } : {}),
           }
         : undefined,
     // Espaçador herda a fonte do corpo (Normal) — com a altura exata, não
@@ -2176,8 +2233,10 @@ const backdropParagraph = (b: NonNullable<CellIR['backdrop']>, centered = false)
     ],
   });
 
-const border = (b?: { w: number; color: string }): IBorderOptions =>
-  b ? { style: BorderStyle.SINGLE, size: Math.max(2, Math.round(b.w * 6)), color: b.color } : { style: BorderStyle.NONE, size: 0, color: 'auto' };
+/** Traço do Studio → do Word (tracejado e pontilhado também). */
+const strokeStyle = (b: Stroke) => (b.style === 'dashed' ? BorderStyle.DASHED : b.style === 'dotted' ? BorderStyle.DOTTED : BorderStyle.SINGLE);
+const border = (b?: Stroke): IBorderOptions =>
+  b ? { style: strokeStyle(b), size: Math.max(2, Math.round(b.w * 6)), color: b.color } : { style: BorderStyle.NONE, size: 0, color: 'auto' };
 
 const cellBorder = (b?: { w: number; color: string }): IBorderOptions =>
   b ? border(b) : { style: BorderStyle.NIL, size: 0, color: 'auto' };
@@ -2495,6 +2554,11 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   // Vão menor que uma linha do corpo fica exato (espaço antes do parágrafo,
   // ou parágrafo-vão que cresce entre tabelas): arredondar pra uma linha
   // inteira somava pontos em cada bloco e a página cheia do Studio transbordava.
+  /** O Studio pôs o bloco de design na página seguinte e a anterior também termina em bloco de design (não em texto corrido). */
+  const designedBreak = (prevPage: number, block: DocumentLayout['blocks'][number]) => {
+    const last = layout.blocks.filter((b) => b.page === prevPage && b.tree).at(-1);
+    return block.type === 'design_block' && last?.type === 'design_block';
+  };
   const blanksFor = (gap: number) => (gap < bodyLine * 0.95 ? 0 : Math.max(1, Math.floor(gap / bodyLine + 0.2)));
   for (const [gi, group] of groups.entries()) {
     const pageTop = (i: number) => layout.pages[i].box.y;
@@ -2586,8 +2650,11 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           // Primeiro bloco da página: a distância do topo continua exata.
           trimTop(out, pageTop(block.page) + marginTop - area.y);
           placed = withGap(out, Math.max(0, area.y - (pageTop(block.page) + marginTop)));
-        } else if (cursor.page !== block.page && (slide || cursor.slide)) {
-          // Slide (bloco do tamanho da página): cada um na sua folha.
+        } else if (cursor.page !== block.page && (slide || cursor.slide || designedBreak(cursor.page, block))) {
+          // Slide (bloco do tamanho da página): cada um na sua folha. Página
+          // montada com blocos de design (cards, títulos de tópico): a quebra
+          // do Studio vale — correndo, o título ficava sozinho no pé da folha
+          // e o card dele partia entre duas páginas.
           const top = Math.max(0, area.y - (pageTop(block.page) + marginTop));
           trimTop(out, pageTop(block.page) + marginTop - area.y);
           placed = [{ kind: 'p', runs: [], pageBreakBefore: true, tiny: true }, ...withGap(out, top)];

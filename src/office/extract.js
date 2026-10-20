@@ -159,6 +159,18 @@
     return list.length ? list : undefined;
   };
 
+  /** text-shadow (o primeiro): título com a cópia deslocada em outra cor atrás. */
+  const textShadow = (el, cs) => {
+    if (!cs.textShadow || cs.textShadow === 'none') return undefined;
+    const s = cs.textShadow.split(/,(?![^(]*\))/)[0].trim();
+    const c = s.match(/(?:rgba?|lab|lch|oklab|oklch|hsla?|hwb|color)\([^)]*\)/);
+    const raw = c && (translucent(el, c[0]) || { color: color(c[0]), alpha: 1 });
+    if (!raw || !raw.color || raw.alpha === 0) return undefined;
+    const [x = 0, y = 0, blur = 0] = s.replace(c[0], '').trim().split(/\s+/).map(parseFloat).map((v) => v * scaleOf(el));
+    if (Math.abs(x) < 0.5 && Math.abs(y) < 0.5 && blur < 0.5) return undefined;
+    return { x, y, blur, color: raw.color, alpha: raw.alpha };
+  };
+
   /**
    * O que está atrás do elemento: a primeira cor de fundo opaca dos pais
    * (com os fundos translúcidos do caminho por cima dela), ou null quando
@@ -280,6 +292,7 @@
       strike: deco.includes('line-through'),
       highlight: el.tagName === 'MARK' ? color(cs.backgroundColor) : null,
       verticalAlign: cs.verticalAlign === 'super' ? 'super' : cs.verticalAlign === 'sub' ? 'sub' : null,
+      shadow: textShadow(el, cs),
     };
   };
 
@@ -306,6 +319,7 @@
     let autonumberText = null;
     // Onde o número aparece e o vão até o texto que vem depois dele (PowerPoint: o número vai como texto).
     let autonumberBox = null;
+    let autonumberFill = null;
     let autonumberGap = null;
     // Só os números que aparecem (um escondido não conta).
     const multiNumber = [...el.querySelectorAll('[data-autonumber]')].filter((m) => !m.closest('[data-editor-only]') && (m.checkVisibility ? m.checkVisibility({ visibilityProperty: true, opacityProperty: true }) : true)).length > 1;
@@ -427,6 +441,11 @@
         // parágrafo: guarda como ele aparece (cor, tamanho, peso).
         autonumberStyle = { ...runStyle(node), lineHeight: paraStyle(node).lineHeight };
         autonumberBox = box(node);
+        // Fundo do selo: no número ou no invólucro que só tem ele (span com fundo e padding).
+        for (let e = node; e && e.textContent.trim() === autonumberText && autonumberFill === null; e = e.parentElement) {
+          const m = rgbaOf(getComputedStyle(e).backgroundColor);
+          if (m && (m[4] === undefined || Number(m[4]) > 0.99)) autonumberFill = { color: color(getComputedStyle(e).backgroundColor), box: box(e) };
+        }
         return;
       }
       if (node.tagName === 'BR') {
@@ -485,7 +504,7 @@
     const inkTop = ink.length ? Math.min(...ink.map((r) => r.top + window.scrollY)) : 0;
     const inkBottom = ink.length ? Math.max(...ink.map((r) => r.bottom + window.scrollY)) : 0;
     const middle = centers && ink.length && inkTop - tb.y > 3 && Math.abs((inkTop - tb.y) - (tb.y + tb.h - inkBottom)) < 3 ? true : undefined;
-    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle, autonumberFormat, autonumberText, autonumberBox, autonumberGap };
+    return { k: 'text', id: nextId++, box: tb, inkRight, middle, paras: keep.length ? keep : [{ ...paraStyle(el), runs: [] }], autonumber, autonumberStyle, autonumberFormat, autonumberText, autonumberBox, autonumberGap, autonumberFill };
   };
 
   const hasBlockChildren = (el) =>
