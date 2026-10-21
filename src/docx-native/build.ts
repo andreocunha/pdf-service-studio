@@ -66,7 +66,21 @@ const emu = (px: number) => Math.round(px * 9525);
 type Stroke = { w: number; color: string; style?: 'dashed' | 'dotted' };
 type CardShadow = { x: number; y: number; blur: number; spread: number; color: string; alpha: number };
 /** Forma arredondada a montar no index.ts, no lugar dos marcadores LexRoundOpen/Close-<id>. */
-export type RoundShape = { w: number; h: number; radius: number; fill?: string; line?: Stroke; shadow?: CardShadow; adj: number; inset: [number, number, number, number] };
+export type RoundShape = {
+  w: number;
+  h: number;
+  radius: number;
+  fill?: string;
+  line?: Stroke;
+  shadow?: CardShadow;
+  adj: number;
+  /** Forma com o conteúdo dentro: margem interna (esquerda, direita, cima, baixo). */
+  inset?: [number, number, number, number];
+  /** Plano B: forma solta atrás do texto, na posição (x, y) do primeiro parágrafo da célula. */
+  back?: boolean;
+  x?: number;
+  y?: number;
+};
 type RunIR =
   | { kind: 'text'; text: string; run: Run; face: Face | null; spacing?: number }
   | { kind: 'br' }
@@ -104,6 +118,8 @@ type PIR = {
   blank?: boolean;
   /** Estilo-marcador trocado no index.ts (abre/fecha a forma arredondada). */
   marker?: string;
+  /** Âncora da forma arredondada atrás da célula (plano B, round.ts). */
+  back?: number;
 };
 type CellIR = {
   width: number;
@@ -2181,7 +2197,7 @@ const structural = (p: PIR): number | undefined => {
 
 const toParagraph = (p: PIR): Paragraph => {
   if (p.blank) return new Paragraph({ children: p.bookmark ? [new Bookmark({ id: p.bookmark, children: [] })] : [] });
-  const children = toRuns(p);
+  const children = p.back === undefined ? toRuns(p) : [new TextRun({ text: '', style: `LexRoundBack-${p.back}` }), ...toRuns(p)];
   const body = p.bookmark ? [new Bookmark({ id: p.bookmark, children })] : children;
   return new Paragraph({
     // Propriedade "quebra de página antes" (não um caractere de quebra): se a
@@ -2278,6 +2294,10 @@ const toBlocks = (items: OutIR[], body = false): (Paragraph | Table)[] => {
 /** Profundidade de formas arredondadas: o Word não aceita caixa de texto dentro de caixa de texto. */
 let roundDepth = 0;
 let roundShapes: RoundShape[] = [];
+/** Altura útil da página: card mais alto que ela o Word quebra, e a forma solta não acompanharia. */
+let pageRoom = Infinity;
+/** Células com fundo em volta: o sombreamento delas cobre o que vai atrás do texto. */
+let shaded = 0;
 
 /**
  * Card arredondado (técnica da Lex Design): a célula fica sem pintura e
@@ -2307,6 +2327,30 @@ const roundable = (cell: CellIR): boolean => {
 };
 const sameStroke = (sides: (Stroke | undefined)[]) =>
   sides.length === 4 && sides.every((x) => x && x.color === sides[0]!.color && Math.abs(x.w - sides[0]!.w) < 0.5 && x.style === sides[0]!.style);
+const adjOf = (radius: number, w: number, h: number) => Math.round(Math.min(50000, (radius / Math.max(1, Math.min(w, h))) * 100000));
+
+/**
+ * Plano B (round.ts): a célula fica na tabela, sem pintura, e a forma vai
+ * atrás dela. Contorno da forma = o traço da maioria dos lados; o lado
+ * diferente (a linha do tempo encostada no ícone) segue borda da célula.
+ */
+const backCell = (cell: CellIR, height: number): { cell: CellIR; id: number } => {
+  const b = cell.borders ?? {};
+  const sides = (['top', 'right', 'bottom', 'left'] as const).map((k) => b[k]);
+  const same = (x?: Stroke, y?: Stroke) => (!x && !y) || Boolean(x && y && x.color === y.color && Math.abs(x.w - y.w) < 0.5 && x.style === y.style);
+  const votes = sides.map((x) => sides.filter((y) => same(x, y)).length);
+  const best = Math.max(...votes);
+  // Empate: fica sem contorno (os lados seguem bordas retas da célula).
+  const line = sides.find((x, i) => votes[i] === best && (best > 2 || !x));
+  const rest = Object.fromEntries((['top', 'right', 'bottom', 'left'] as const).filter((k) => b[k] && !same(b[k], line)).map((k) => [k, b[k]]));
+  const id = roundShapes.length;
+  roundShapes.push({
+    w: cell.width, h: height, radius: cell.round!.radius, adj: adjOf(cell.round!.radius, cell.width, height),
+    fill: cell.fill, line, shadow: cell.round!.shadow, back: true, x: -(cell.margins?.[3] ?? 0), y: 0,
+  });
+  return { cell: { ...cell, round: undefined, fill: undefined, borders: Object.keys(rest).length ? rest : undefined }, id };
+};
+
 const roundCell = (cell: CellIR, height: number, span: number): TableCell => {
   const id = roundShapes.length;
   const b = cell.borders;
@@ -2318,7 +2362,7 @@ const roundCell = (cell: CellIR, height: number, span: number): TableCell => {
   // vazio o Word rendia mais alto, e tabela aninhada ignorava a margem da
   // célula. Embaixo o Word ignora margem negativa: o recuo sai do espaço do
   // último parágrafo, junto com o parágrafo de 1pt que fecha a caixa.
-  const adj = Math.round(Math.min(50000, (cell.round!.radius / Math.max(1, Math.min(cell.width, height))) * 100000));
+  const adj = adjOf(cell.round!.radius, cell.width, height);
   const back = Math.min(cell.width, height) * (adj / 100000) * 0.29289;
   const low = Math.min(mb, back + TAIL);
   roundShapes.push({ w: cell.width, h: height, radius: cell.round!.radius, adj, fill: cell.fill, line, shadow: cell.round!.shadow, inset: [ml - back, mr - back, mt - back, 0] });
@@ -2345,6 +2389,18 @@ const roundCell = (cell: CellIR, height: number, span: number): TableCell => {
   });
 };
 
+/** Altura de uma célula mesclada: a linha dela e as de baixo que continuam a mescla. */
+const mergedHeight = (t: TIR, ri: number, from: number): number => {
+  let h = t.rows[ri].height ?? 0;
+  for (const row of t.rows.slice(ri + 1)) {
+    let x = 0;
+    const below = row.cells.find((c) => (x += tw(c.width)) - tw(c.width) === from);
+    if (below?.vmerge !== 'continue') break;
+    h += row.height ?? 0;
+  }
+  return h;
+};
+
 const toTable = (t: TIR): Table => {
   // Grade comum a todas as linhas: linhas com células diferentes (título do
   // card + corpo com ícone) na mesma tabela, cada célula ocupando as colunas
@@ -2367,18 +2423,22 @@ const toTable = (t: TIR): Table => {
     },
     margins: { top: 0, bottom: 0, left: 0, right: 0 },
     rows: t.rows.map(
-      (row) =>
+      (row, ri) =>
         new TableRow({
           cantSplit: true,
           height: row.height ? { value: tw(Math.max(1, row.height)), rule: row.exact ? HeightRule.EXACT : HeightRule.ATLEAST } : undefined,
           children: row.cells.map((card, ci) => {
-            // Peça pequena (o "ou" redondo, etiqueta de uma linha) fica tabela: o
-            // parágrafo da forma soma alguns px, e em página cheia empurrava a
-            // última linha pra folha seguinte.
-            const cell = card.round && !(roundDepth === 0 && !card.vmerge && (row.height ?? 0) >= 28 && roundable(card)) ? { ...card, round: undefined, borders: card.round.square ?? card.borders } : card;
             const from = row.cells.slice(0, ci).reduce((a, c) => a + tw(c.width), 0);
-            const span = spanOf(from, from + tw(cell.width));
-            if (cell.round) return roundCell(cell, row.height ?? 0, span);
+            const span = spanOf(from, from + tw(card.width));
+            // Card arredondado: forma com o conteúdo dentro quando ela comporta.
+            // Peça pequena (o "ou" redondo, etiqueta de uma linha) não: o
+            // parágrafo da forma soma alguns px, e em página cheia empurrava a
+            // última linha pra folha seguinte. O resto vai pelo plano B (forma
+            // atrás da célula); dentro de caixa de texto, nem ele — fica reto.
+            if (card.round && roundDepth === 0 && !card.vmerge && (row.height ?? 0) >= 28 && roundable(card)) return roundCell(card, row.height!, span);
+            const tall = card.vmerge === 'restart' ? mergedHeight(t, ri, from) : row.height ?? 0;
+            const backed = card.round && roundDepth === 0 && !shaded && !card.backdrop && card.vmerge !== 'continue' && tall >= 4 && tall <= pageRoom ? backCell(card, tall) : undefined;
+            const cell = backed?.cell ?? (card.round ? { ...card, round: undefined, borders: card.round.square ?? card.borders } : card);
             // Padding de cima/baixo vira espaçamento do parágrafo, não margem da
             // célula: o Word aplica a MAIOR margem vertical da linha a todas as
             // células (medido: ícone ao lado de card com 20px de padding ganhava
@@ -2389,7 +2449,9 @@ const toTable = (t: TIR): Table => {
             // Com arte de fundo, não: a arte é ancorada no primeiro parágrafo e
             // a centralização a levaria junto — posições do Studio, pelo topo.
             const artCentered = Boolean(cell.backdrop?.center) && cell.vAlign === 'center';
-            const centered = cell.vAlign === 'center' && (!cell.backdrop || artCentered);
+            // Forma atrás (plano B) é ancorada no primeiro parágrafo: posições do
+            // Studio, pelo topo, como a arte de fundo.
+            const centered = cell.vAlign === 'center' && (!cell.backdrop || artCentered) && !backed;
             const [mt, , mb] = centered ? [0, 0, 0] : cell.margins ?? [0, 0, 0, 0];
             let items = cell.children;
             // Linha apertada dentro de célula: aqui o Word não corta o aperto
@@ -2429,7 +2491,17 @@ const toTable = (t: TIR): Table => {
             // margem da célula pra tabela aninhada: o recuo vai na tabela.
             const ml = cell.margins?.[3] ?? 0;
             if (roundDepth > 0 && ml) items = items.map((k) => (k.kind === 't' ? { ...k, indent: k.indent + ml } : k));
+            if (backed) {
+              const first = items[0];
+              items =
+                first?.kind === 'p' && !first.blank && !(first.spaceBefore ?? 0)
+                  ? [{ ...first, back: backed.id }, ...items.slice(1)]
+                  : [{ kind: 'p', runs: [], tiny: true, back: backed.id }, ...items];
+            }
+            const shade = cell.fill ?? cell.notch;
+            if (shade) shaded++;
             const children = toBlocks(items);
+            if (shade) shaded--;
             // Arte centralizada sem texto: a âncora é o único parágrafo (senão o
             // parágrafo vazio de baixo deslocaria o centro).
             if (artCentered && items.every((k) => k.kind === 'p' && !k.runs.length && !k.bookmark)) children.splice(0, children.length);
@@ -2444,7 +2516,7 @@ const toTable = (t: TIR): Table => {
               margins: cell.margins
                 ? { top: 0, right: tw(cell.margins[1]), bottom: 0, left: tw(cell.margins[3]), marginUnitType: WidthType.DXA }
                 : undefined,
-              verticalAlign: cell.vAlign === 'center' && (!cell.backdrop || (cell.backdrop.center && cell.vAlign === 'center')) ? VerticalAlign.CENTER : cell.vAlign === 'bottom' ? VerticalAlign.BOTTOM : VerticalAlign.TOP,
+              verticalAlign: backed ? VerticalAlign.TOP : cell.vAlign === 'center' && (!cell.backdrop || (cell.backdrop.center && cell.vAlign === 'center')) ? VerticalAlign.CENTER : cell.vAlign === 'bottom' ? VerticalAlign.BOTTOM : VerticalAlign.TOP,
               // Lado sem borda fica "não definido" (nil): "nenhuma" explícita na
               // célula vizinha apagava a borda do card ao lado no Word.
               borders: {
@@ -2883,6 +2955,8 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   linkTargets = new Set();
   roundShapes = [];
   roundDepth = 0;
+  pageRoom = meta.pageHeightPx * 0.85;
+  shaded = 0;
   for (const id of referenced) {
     const p = targets.get(id);
     if (!p) continue;
