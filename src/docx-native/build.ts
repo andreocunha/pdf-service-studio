@@ -2369,24 +2369,29 @@ const roundCell = (cell: CellIR, height: number, span: number): TableCell => {
   const adj = adjOf(cell.round!.radius, cell.width, height);
   const back = Math.min(cell.width, height) * (adj / 100000) * 0.29289;
   const low = Math.min(mb, back + TAIL);
-  // Conteúdo centralizado: o Word centraliza na linha de dentro, então ela
-  // fica simétrica na forma (o que sobra embaixo — recuo + 1pt — também em
-  // cima), em vez de começar no padding do Studio.
-  const centered = cell.vAlign === 'center';
-  const top = centered ? back + TAIL : mt;
-  roundShapes.push({ w: cell.width, h: height, radius: cell.round!.radius, adj, fill: cell.fill, line, shadow: cell.round!.shadow, inset: [ml - back, mr - back, top - back, 0] });
   const width = Math.max(1, cell.width - ml - mr);
-  const inner: TIR = {
+  // Altura da forma = margem de cima + linhas + recuo de baixo + 1pt.
+  const box = (top: number, centered = false): TIR => ({
     kind: 't',
     width,
     indent: 0,
-    // Altura da forma = margem de cima + linhas + recuo de baixo + 1pt.
     rows: [{ height: Math.max(0, height - top - back - TAIL), cells: [{ ...cell, width, margins: [0, 0, centered ? 0 : mb - low, 0], round: undefined, fill: undefined, notch: undefined, borders: undefined }] }],
-  };
-  roundDepth++;
+  });
   // Conteúdo que já é uma tabela (ícone | texto) sobe pro lugar da de fora:
   // tabela dentro de célula obriga um parágrafo depois, e o card crescia.
-  const table = toTable(unwrap(inner));
+  let top = mt;
+  let inner = unwrap(box(mt));
+  // Conteúdo centralizado direto na célula: o Word centraliza na linha de
+  // dentro, então ela fica simétrica na forma (o que sobra embaixo — recuo +
+  // 1pt — também em cima). Tabela desembrulhada já vem com as posições do
+  // Studio (a célula centralizada some): fica pelo padding.
+  if (cell.vAlign === 'center' && inner.rows[0]?.cells[0]?.children === cell.children) {
+    top = back + TAIL;
+    inner = box(top, true);
+  }
+  roundShapes.push({ w: cell.width, h: height, radius: cell.round!.radius, adj, fill: cell.fill, line, shadow: cell.round!.shadow, inset: [ml - back, mr - back, top - back, 0] });
+  roundDepth++;
+  const table = toTable(inner);
   roundDepth--;
   return new TableCell({
     width: { size: tw(cell.width), type: WidthType.DXA },
