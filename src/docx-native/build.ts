@@ -2334,7 +2334,7 @@ const adjOf = (radius: number, w: number, h: number) => Math.round(Math.min(5000
  * atrás dela. Contorno da forma = o traço da maioria dos lados; o lado
  * diferente (a linha do tempo encostada no ícone) segue borda da célula.
  */
-const backCell = (cell: CellIR, height: number): { cell: CellIR; id: number } => {
+const backCell = (cell: CellIR, height: number): { cell: CellIR; id: number; borders?: CellIR['borders'] } => {
   const b = cell.borders ?? {};
   const sides = (['top', 'right', 'bottom', 'left'] as const).map((k) => b[k]);
   const same = (x?: Stroke, y?: Stroke) => (!x && !y) || Boolean(x && y && x.color === y.color && Math.abs(x.w - y.w) < 0.5 && x.style === y.style);
@@ -2348,7 +2348,8 @@ const backCell = (cell: CellIR, height: number): { cell: CellIR; id: number } =>
     w: cell.width, h: height, radius: cell.round!.radius, adj: adjOf(cell.round!.radius, cell.width, height),
     fill: cell.fill, line, shadow: cell.round!.shadow, back: true, x: -(cell.margins?.[3] ?? 0), y: 0,
   });
-  return { cell: { ...cell, round: undefined, fill: undefined, borders: Object.keys(rest).length ? rest : undefined }, id };
+  const borders = Object.keys(rest).length ? rest : undefined;
+  return { cell: { ...cell, round: undefined, fill: undefined, borders }, id, borders };
 };
 
 const roundCell = (cell: CellIR, height: number, span: number): TableCell => {
@@ -2413,6 +2414,9 @@ const toTable = (t: TIR): Table => {
   const grid = [...edges].sort((a, b) => a - b);
   const widths = grid.slice(1).map((e, i) => e - grid[i]);
   const spanOf = (from: number, to: number) => grid.filter((e) => e > from && e <= to).length;
+  // Mescla vertical cujo card foi pro plano B: as linhas de baixo também
+  // ficam sem pintura (o sombreamento delas cobriria os cantos de baixo).
+  const backedMerge = new Map<number, CellIR['borders']>();
   return new Table({
     layout: TableLayoutType.FIXED,
     width: { size: widths.reduce((a, b) => a + b, 0), type: WidthType.DXA },
@@ -2438,7 +2442,15 @@ const toTable = (t: TIR): Table => {
             if (card.round && roundDepth === 0 && !card.vmerge && (row.height ?? 0) >= 28 && roundable(card)) return roundCell(card, row.height!, span);
             const tall = card.vmerge === 'restart' ? mergedHeight(t, ri, from) : row.height ?? 0;
             const backed = card.round && roundDepth === 0 && !shaded && !card.backdrop && card.vmerge !== 'continue' && tall >= 4 && tall <= pageRoom ? backCell(card, tall) : undefined;
-            const cell = backed?.cell ?? (card.round ? { ...card, round: undefined, borders: card.round.square ?? card.borders } : card);
+            if (card.vmerge === 'restart') backedMerge.delete(from);
+            if (backed && card.vmerge === 'restart') backedMerge.set(from, backed.borders);
+            const cell =
+              backed?.cell ??
+              (card.vmerge === 'continue' && backedMerge.has(from)
+                ? { ...card, round: undefined, fill: undefined, notch: undefined, borders: backedMerge.get(from) }
+                : card.round
+                  ? { ...card, round: undefined, borders: card.round.square ?? card.borders }
+                  : card);
             // Padding de cima/baixo vira espaçamento do parágrafo, não margem da
             // célula: o Word aplica a MAIOR margem vertical da linha a todas as
             // células (medido: ícone ao lado de card com 20px de padding ganhava

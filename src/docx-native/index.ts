@@ -119,8 +119,12 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
     // Parágrafo que carrega a quebra de seção: mínimo. Do tamanho de uma
     // linha, numa página cheia ele caía na folha seguinte — e a página nova
     // ficava com o cabeçalho da seção anterior.
+    // Cards arredondados: no corpo e no cabeçalho (o menu de navegação).
+    for (const path of Object.keys(files).filter((p) => /^word\/(document|header\d+|footer\d+)\.xml$/.test(p))) {
+      files[path] = strToU8(roundShapes(strFromU8(files[path] as Uint8Array), rounds));
+    }
     files['word/document.xml'] = strToU8(
-      roundShapes(strFromU8(files['word/document.xml'] as Uint8Array), rounds).replace(
+      strFromU8(files['word/document.xml'] as Uint8Array).replace(
         /<w:p><w:pPr><w:sectPr/g,
         '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/><w:rPr><w:sz w:val="2"/><w:szCs w:val="2"/></w:rPr><w:sectPr',
       ),
