@@ -2294,7 +2294,7 @@ const toBlocks = (items: OutIR[], body = false): (Paragraph | Table)[] => {
 /** Profundidade de formas arredondadas: o Word não aceita caixa de texto dentro de caixa de texto. */
 let roundDepth = 0;
 let roundShapes: RoundShape[] = [];
-/** Altura útil da página: card mais alto que ela o Word quebra, e a forma solta não acompanharia. */
+/** Altura útil da página: card mais alto que ela o Word quebra — a forma não continua na folha seguinte. */
 let pageRoom = Infinity;
 /** Células com fundo em volta: o sombreamento delas cobre o que vai atrás do texto. */
 let shaded = 0;
@@ -2452,7 +2452,7 @@ const toTable = (t: TIR): Table => {
             // parágrafo da forma soma alguns px, e em página cheia empurrava a
             // última linha pra folha seguinte. O resto vai pelo plano B (forma
             // atrás da célula); dentro de caixa de texto, nem ele — fica reto.
-            if (card.round && roundDepth === 0 && !card.vmerge && (row.height ?? 0) >= 28 && roundable(card)) return roundCell(card, row.height!, span);
+            if (card.round && roundDepth === 0 && !card.vmerge && (row.height ?? 0) >= 28 && row.height! <= pageRoom && roundable(card)) return roundCell(card, row.height!, span);
             const tall = card.vmerge === 'restart' ? mergedHeight(t, ri, from) : row.height ?? 0;
             const backed = card.round && roundDepth === 0 && !shaded && !card.backdrop && card.vmerge !== 'continue' && tall >= 4 && tall <= pageRoom ? backCell(card, tall) : undefined;
             if (card.vmerge === 'restart') backedMerge.delete(from);
