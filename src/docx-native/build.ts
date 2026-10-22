@@ -2334,22 +2334,25 @@ const adjOf = (radius: number, w: number, h: number) => Math.round(Math.min(5000
  * atrás dela. Contorno da forma = o traço da maioria dos lados; o lado
  * diferente (a linha do tempo encostada no ícone) segue borda da célula.
  */
-const backCell = (cell: CellIR, height: number): { cell: CellIR; id: number; borders?: CellIR['borders'] } => {
+const sameLine = (x?: Stroke, y?: Stroke) => (!x && !y) || Boolean(x && y && x.color === y.color && Math.abs(x.w - y.w) < 0.5 && x.style === y.style);
+/** Bordas da célula que o contorno da forma não desenha. */
+const besides = (borders: CellIR['borders'], line?: Stroke): CellIR['borders'] => {
+  const rest = Object.fromEntries(Object.entries(borders ?? {}).filter(([, x]) => x && !sameLine(x, line)));
+  return Object.keys(rest).length ? rest : undefined;
+};
+const backCell = (cell: CellIR, height: number): { cell: CellIR; id: number; line?: Stroke } => {
   const b = cell.borders ?? {};
   const sides = (['top', 'right', 'bottom', 'left'] as const).map((k) => b[k]);
-  const same = (x?: Stroke, y?: Stroke) => (!x && !y) || Boolean(x && y && x.color === y.color && Math.abs(x.w - y.w) < 0.5 && x.style === y.style);
-  const votes = sides.map((x) => sides.filter((y) => same(x, y)).length);
+  const votes = sides.map((x) => sides.filter((y) => sameLine(x, y)).length);
   const best = Math.max(...votes);
   // Empate: fica sem contorno (os lados seguem bordas retas da célula).
   const line = sides.find((x, i) => votes[i] === best && (best > 2 || !x));
-  const rest = Object.fromEntries((['top', 'right', 'bottom', 'left'] as const).filter((k) => b[k] && !same(b[k], line)).map((k) => [k, b[k]]));
   const id = roundShapes.length;
   roundShapes.push({
     w: cell.width, h: height, radius: cell.round!.radius, adj: adjOf(cell.round!.radius, cell.width, height),
     fill: cell.fill, line, shadow: cell.round!.shadow, back: true, x: -(cell.margins?.[3] ?? 0), y: 0,
   });
-  const borders = Object.keys(rest).length ? rest : undefined;
-  return { cell: { ...cell, round: undefined, fill: undefined, borders }, id, borders };
+  return { cell: { ...cell, round: undefined, fill: undefined, borders: besides(cell.borders, line) }, id, line };
 };
 
 const roundCell = (cell: CellIR, height: number, span: number): TableCell => {
@@ -2366,14 +2369,19 @@ const roundCell = (cell: CellIR, height: number, span: number): TableCell => {
   const adj = adjOf(cell.round!.radius, cell.width, height);
   const back = Math.min(cell.width, height) * (adj / 100000) * 0.29289;
   const low = Math.min(mb, back + TAIL);
-  roundShapes.push({ w: cell.width, h: height, radius: cell.round!.radius, adj, fill: cell.fill, line, shadow: cell.round!.shadow, inset: [ml - back, mr - back, mt - back, 0] });
+  // Conteúdo centralizado: o Word centraliza na linha de dentro, então ela
+  // fica simétrica na forma (o que sobra embaixo — recuo + 1pt — também em
+  // cima), em vez de começar no padding do Studio.
+  const centered = cell.vAlign === 'center';
+  const top = centered ? back + TAIL : mt;
+  roundShapes.push({ w: cell.width, h: height, radius: cell.round!.radius, adj, fill: cell.fill, line, shadow: cell.round!.shadow, inset: [ml - back, mr - back, top - back, 0] });
   const width = Math.max(1, cell.width - ml - mr);
   const inner: TIR = {
     kind: 't',
     width,
     indent: 0,
     // Altura da forma = margem de cima + linhas + recuo de baixo + 1pt.
-    rows: [{ height: Math.max(0, height - mt - back - TAIL), cells: [{ ...cell, width, margins: [0, 0, mb - low, 0], round: undefined, fill: undefined, notch: undefined, borders: undefined }] }],
+    rows: [{ height: Math.max(0, height - top - back - TAIL), cells: [{ ...cell, width, margins: [0, 0, centered ? 0 : mb - low, 0], round: undefined, fill: undefined, notch: undefined, borders: undefined }] }],
   };
   roundDepth++;
   // Conteúdo que já é uma tabela (ícone | texto) sobe pro lugar da de fora:
@@ -2416,7 +2424,7 @@ const toTable = (t: TIR): Table => {
   const spanOf = (from: number, to: number) => grid.filter((e) => e > from && e <= to).length;
   // Mescla vertical cujo card foi pro plano B: as linhas de baixo também
   // ficam sem pintura (o sombreamento delas cobriria os cantos de baixo).
-  const backedMerge = new Map<number, CellIR['borders']>();
+  const backedMerge = new Map<number, Stroke | undefined>();
   return new Table({
     layout: TableLayoutType.FIXED,
     width: { size: widths.reduce((a, b) => a + b, 0), type: WidthType.DXA },
@@ -2443,11 +2451,11 @@ const toTable = (t: TIR): Table => {
             const tall = card.vmerge === 'restart' ? mergedHeight(t, ri, from) : row.height ?? 0;
             const backed = card.round && roundDepth === 0 && !shaded && !card.backdrop && card.vmerge !== 'continue' && tall >= 4 && tall <= pageRoom ? backCell(card, tall) : undefined;
             if (card.vmerge === 'restart') backedMerge.delete(from);
-            if (backed && card.vmerge === 'restart') backedMerge.set(from, backed.borders);
+            if (backed && card.vmerge === 'restart') backedMerge.set(from, backed.line);
             const cell =
               backed?.cell ??
               (card.vmerge === 'continue' && backedMerge.has(from)
-                ? { ...card, round: undefined, fill: undefined, notch: undefined, borders: backedMerge.get(from) }
+                ? { ...card, round: undefined, fill: undefined, notch: undefined, borders: besides(card.borders, backedMerge.get(from)) }
                 : card.round
                   ? { ...card, round: undefined, borders: card.round.square ?? card.borders }
                   : card);
