@@ -5,6 +5,7 @@
  */
 import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from 'fflate';
 import { Packer } from 'docx';
+import { roundShapes } from './round.js';
 
 import { embedFonts } from '../docx-fonts.js';
 import { deflateSync } from 'node:zlib';
@@ -102,7 +103,7 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
       return art ?? (color && color !== 'ffffff' ? solidPng(color) : null);
     };
 
-    const { doc, used, pageOffsets } = await buildDocument({ layout, fonts, assets, background, coverPages: covers });
+    const { doc, used, pageOffsets, rounds } = await buildDocument({ layout, fonts, assets, background, coverPages: covers });
     args.signal?.throwIfAborted();
     const packed = await Packer.toBuffer(doc);
     const files = unzipSync(new Uint8Array(packed)) as Zippable;
@@ -118,6 +119,10 @@ export const renderNativeDocx = async (args: { documentId: string; workspaceId: 
     // Parágrafo que carrega a quebra de seção: mínimo. Do tamanho de uma
     // linha, numa página cheia ele caía na folha seguinte — e a página nova
     // ficava com o cabeçalho da seção anterior.
+    // Cards arredondados: no corpo e no cabeçalho (o menu de navegação).
+    for (const path of Object.keys(files).filter((p) => /^word\/(document|header\d+|footer\d+)\.xml$/.test(p))) {
+      files[path] = strToU8(roundShapes(strFromU8(files[path] as Uint8Array), rounds));
+    }
     files['word/document.xml'] = strToU8(
       strFromU8(files['word/document.xml'] as Uint8Array).replace(
         /<w:p><w:pPr><w:sectPr/g,

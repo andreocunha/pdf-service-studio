@@ -82,6 +82,8 @@ type Deco = {
   pad?: [number, number, number, number];
   /** Maior raio de canto (px). */
   radius?: number;
+  /** Cantos com raios diferentes. */
+  uneven?: boolean;
   /** Pintura que o Word não tem (gradiente, sombra, imagem): vai capturada, atrás do texto. */
   paint?: boolean;
   abs?: boolean;
