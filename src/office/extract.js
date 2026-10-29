@@ -458,6 +458,26 @@
         return;
       }
       const href = node.tagName === 'A' ? node.getAttribute('data-block-ref') || node.getAttribute('href') : null;
+      if (node.hasAttribute('data-list-item')) {
+        // Lista vinda do Figma (zona editável do Studio): o item é um <span>
+        // em bloco — a zona não aceita <ul>/<li>. Bolinha é desenhada no fundo
+        // do span, número é o contador nativo (display: list-item); o subnível
+        // fica DENTRO do item pai, então o nível é quantos itens o contêm.
+        current = null;
+        let level = 0;
+        for (let a = node.parentElement; a && a !== el; a = a.parentElement) {
+          if (a.hasAttribute('data-list-item')) level++;
+        }
+        const item = { kind: cs.display === 'list-item' ? cs.listStyleType || 'decimal' : 'bullet', level };
+        open(node, item);
+        const c = contentBox(node);
+        current.x = c.x;
+        current.indent = Math.max(0, c.x - box(node.parentElement).x);
+        if (item.kind === 'bullet') current.marker = { color: color(cs.color) || undefined };
+        [...node.childNodes].forEach((ch) => walk(ch, item, href || linkRef));
+        current = null;
+        return;
+      }
       if (node.tagName === 'UL' || node.tagName === 'OL') {
         const depth = list ? list.level + 1 : 0;
         const kind = node.tagName === 'OL' ? cs.listStyleType || 'decimal' : 'bullet';
