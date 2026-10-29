@@ -13,6 +13,8 @@
   let nextId = 0;
   /** Envoltório de cada lista do Figma → número da lista (numeração do Word). */
   const listGroups = new Map();
+  /** Nível no Word de cada item de lista do Figma já visto. */
+  const listLevels = new Map();
 
   const box = (el) => {
     const r = el.getBoundingClientRect();
@@ -466,10 +468,10 @@
         // do span, número é o contador nativo (display: list-item); o subnível
         // fica DENTRO do item pai, então o nível é quantos itens o contêm.
         current = null;
-        let level = 0;
-        for (let a = node.parentElement; a && a !== el; a = a.parentElement) {
-          if (a.hasAttribute('data-list-item')) level++;
-        }
+        // Nível no Word: um abaixo do item pai (já visto, porque o pai vem
+        // antes na caminhada).
+        const parentItem = node.parentElement && node.parentElement.closest('[data-list-item]');
+        let level = parentItem && el.contains(parentItem) && listLevels.has(parentItem) ? listLevels.get(parentItem) + 1 : 0;
         // Lista = envoltório onde o Studio reinicia a contagem. Subnível de
         // item numerado é a mesma lista (o Word reinicia o nível de baixo
         // quando o de cima avança); debaixo de bolinha, cada sublista é uma
@@ -487,6 +489,7 @@
         // dá o mesmo formato sem ficar acima do aninhamento.
         const cycle = ['decimal', 'lower-alpha', 'lower-roman'].indexOf(kind);
         if (cycle >= 0) level += (cycle - (level % 3) + 3) % 3;
+        listLevels.set(node, level);
         const item = { kind, level, group: listGroups.get(groupEl) };
         open(node, item);
         const c = contentBox(node);
