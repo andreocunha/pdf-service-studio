@@ -470,13 +470,16 @@
         for (let a = node.parentElement; a && a !== el; a = a.parentElement) {
           if (a.hasAttribute('data-list-item')) level++;
         }
-        // Lista = envoltório do item mais de fora (é onde o Studio reinicia a
-        // contagem): no Word, uma numeração por lista, recomeçando em 1.
-        let outer = node;
-        for (let a = node.parentElement; a && a !== el; a = a.parentElement) {
-          if (a.hasAttribute('data-list-item')) outer = a;
+        // Lista = envoltório onde o Studio reinicia a contagem. Subnível de
+        // item numerado é a mesma lista (o Word reinicia o nível de baixo
+        // quando o de cima avança); debaixo de bolinha, cada sublista é uma
+        // lista própria. No Word, uma numeração por lista, recomeçando em 1.
+        let groupEl = node.parentElement;
+        for (let parentItem = groupEl && groupEl.parentElement; parentItem && parentItem !== el
+          && parentItem.hasAttribute('data-list-item') && getComputedStyle(parentItem).display === 'list-item';
+          parentItem = groupEl && groupEl.parentElement) {
+          groupEl = parentItem.parentElement;
         }
-        const groupEl = outer.parentElement;
         if (!listGroups.has(groupEl)) listGroups.set(groupEl, listGroups.size + 1);
         const item = { kind: cs.display === 'list-item' ? cs.listStyleType || 'decimal' : 'bullet', level, group: listGroups.get(groupEl) };
         open(node, item);
