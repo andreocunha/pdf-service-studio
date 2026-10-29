@@ -481,7 +481,13 @@
           groupEl = parentItem.parentElement;
         }
         if (!listGroups.has(groupEl)) listGroups.set(groupEl, listGroups.size + 1);
-        const item = { kind: cs.display === 'list-item' ? cs.listStyleType || 'decimal' : 'bullet', level, group: listGroups.get(groupEl) };
+        const kind = cs.display === 'list-item' ? cs.listStyleType || 'decimal' : 'bullet';
+        // O Studio escolhe o formato pelo nível do Figma (1. → a. → i.), que
+        // pode começar recuado ou pular nível: no Word, o nível é o menor que
+        // dá o mesmo formato sem ficar acima do aninhamento.
+        const cycle = ['decimal', 'lower-alpha', 'lower-roman'].indexOf(kind);
+        if (cycle >= 0) level += (cycle - (level % 3) + 3) % 3;
+        const item = { kind, level, group: listGroups.get(groupEl) };
         open(node, item);
         const c = contentBox(node);
         current.x = c.x;
