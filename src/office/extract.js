@@ -11,6 +11,8 @@
   const TRANSPARENT = /^(transparent|rgba\([^)]*,\s*0\))$/;
   const INLINE = new Set(['inline', 'inline-block', 'contents']);
   let nextId = 0;
+  /** Envoltório de cada lista do Figma → número da lista (numeração do Word). */
+  const listGroups = new Map();
 
   const box = (el) => {
     const r = el.getBoundingClientRect();
@@ -468,7 +470,15 @@
         for (let a = node.parentElement; a && a !== el; a = a.parentElement) {
           if (a.hasAttribute('data-list-item')) level++;
         }
-        const item = { kind: cs.display === 'list-item' ? cs.listStyleType || 'decimal' : 'bullet', level };
+        // Lista = envoltório do item mais de fora (é onde o Studio reinicia a
+        // contagem): no Word, uma numeração por lista, recomeçando em 1.
+        let outer = node;
+        for (let a = node.parentElement; a && a !== el; a = a.parentElement) {
+          if (a.hasAttribute('data-list-item')) outer = a;
+        }
+        const groupEl = outer.parentElement;
+        if (!listGroups.has(groupEl)) listGroups.set(groupEl, listGroups.size + 1);
+        const item = { kind: cs.display === 'list-item' ? cs.listStyleType || 'decimal' : 'bullet', level, group: listGroups.get(groupEl) };
         open(node, item);
         const c = contentBox(node);
         current.x = c.x;
