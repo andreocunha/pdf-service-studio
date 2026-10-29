@@ -313,7 +313,21 @@
    * Um bloco de texto rico (zona editável) vira parágrafos. div/p/li abrem
    * parágrafo novo, <br> é quebra de linha dentro do parágrafo.
    */
-  const textLeaf = (el, link) => {
+  /** Caixa (px, página) que cobre esses nós de texto. */
+  const textBox = (nodes) => {
+    const r = document.createRange();
+    r.setStartBefore(nodes[0]);
+    r.setEndAfter(nodes[nodes.length - 1]);
+    const q = r.getBoundingClientRect();
+    return { x: q.left + window.scrollX, y: q.top + window.scrollY, w: q.width, h: q.height };
+  };
+
+  /**
+   * `only`: só esses nós de texto (texto solto ao lado de filhos em bloco —
+   * "● Partes e imóvel" numa pílula flex: a bolinha vira bloco e o texto
+   * ficava de fora). A caixa é a do próprio texto.
+   */
+  const textLeaf = (el, link, only) => {
     const paras = [];
     let current = null;
     let autonumber = null;
@@ -479,7 +493,7 @@
       [...node.childNodes].forEach((c) => walk(c, list, href || linkRef));
       if (block) current = null;
     };
-    [...el.childNodes].forEach((c) => walk(c, null, link));
+    (only || [...el.childNodes]).forEach((c) => walk(c, null, link));
     const keep = paras.filter((p) => p.runs.length);
     for (const p of keep) {
       delete p.lineBase;
@@ -489,7 +503,7 @@
     // Texto some da captura de um bloco complexo (ele vai editável por cima).
     el.setAttribute('data-dx-text', '');
     // Marcador de lista pendurado fora do texto: a caixa inclui o espaço dele.
-    const tb = contentBox(el);
+    const tb = only ? textBox(only) : contentBox(el);
     const markers = keep.filter((p) => p.x !== undefined).map((p) => p.x - (p.indent >= 4 ? p.indent : p.fontSize * 1.1));
     const left = Math.min(tb.x, ...markers);
     if (left < tb.x) { tb.w += tb.x - left; tb.x = left; }
@@ -632,6 +646,12 @@
       return n.kids ? { ...n, kids: n.kids.map(clipMedia) } : n;
     };
     let kids = kidsOf(el, link);
+    // Texto solto ao lado de filhos em bloco (a bolinha da pílula num flex).
+    const loose = [...el.childNodes].filter((c) => c.nodeType === 3 && c.textContent.trim());
+    if (loose.length) {
+      const t = textLeaf(el, link, loose);
+      if (t) kids.push(t);
+    }
     if (clips && (deco.fill || deco.border)) kids = kids.map((k) => (k.abs && k.k !== 'text' ? clip(k) : k)).filter(Boolean);
     // Grupo que recorta sem cor própria ("Mask group" do Figma): só as imagens.
     else if (clips) kids = kids.map(clipMedia);
