@@ -37,7 +37,7 @@ const spPr = (s: RoundShape): string => {
 
 /** Espaço que a sombra ocupa fora da forma (não encosta no que vem depois). */
 const effectExtent = (s: RoundShape): string => {
-  const sh = s.shadow;
+  const sh = s.flush ? undefined : s.shadow;
   const out = (v: number) => Math.max(0, emu(v + (sh?.blur ?? 0)));
   return sh ? `<wp:effectExtent l="${out(-sh.x)}" t="${out(-sh.y)}" r="${out(sh.x)}" b="${out(sh.y)}"/>` : '<wp:effectExtent l="0" t="0" r="0" b="0"/>';
 };

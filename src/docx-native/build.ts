@@ -80,6 +80,8 @@ export type RoundShape = {
   back?: boolean;
   x?: number;
   y?: number;
+  /** Sombra sem reservar espaço em volta (pílula do menu no cabeçalho: não cabia na célula). */
+  flush?: boolean;
 };
 type RunIR =
   | { kind: 'text'; text: string; run: Run; face: Face | null; spacing?: number }
@@ -120,6 +122,10 @@ type PIR = {
   marker?: string;
   /** Âncora da forma arredondada atrás da célula (plano B, round.ts). */
   back?: number;
+  /** Capa: entrelinha fixa (ver frozenLine). */
+  frozen?: boolean;
+  /** Entrelinha do Studio (px) do parágrafo de várias linhas: a fixa da capa usa ela. */
+  studio?: number;
 };
 type CellIR = {
   width: number;
@@ -712,6 +718,8 @@ const growGap = (gap: number, from: PIR): PIR => {
   // A fonte para em 72pt (~110px de linha): vão maior (capa com o quadro
   // no pé da página) completa com espaço antes, senão o quadro subia.
   const most = (144 / 1.5) * simpleRatio;
+  // Capa: o vão é fixo, do tamanho do Studio (ver frozenLine).
+  if (from.frozen) return { kind: 'p', runs: [], bookmark: from.bookmark, line: { value: Math.max(MIN_LINE, tw(gap)), rule: 'exact' }, frozen: true };
   return {
     kind: 'p',
     runs: [],
@@ -1109,9 +1117,9 @@ const manualClause = (node: Extract<LayoutNode, { k: 'text' }>, p: PIR, ctx: Ctx
  * texto por linha): a distância entre as linhas é a do desenho.
  * Texto de várias linhas segue em Múltiplos (a sobra vai entre as linhas).
  */
-const oneLineSpacing = (para: Para, face: Face | null, wrapped: boolean): Pick<PIR, 'line' | 'spaceBefore' | 'spaceAfter' | 'tight'> => {
+const oneLineSpacing = (para: Para, face: Face | null, wrapped: boolean): Pick<PIR, 'line' | 'spaceBefore' | 'spaceAfter' | 'tight' | 'studio'> => {
   const line = lineOf(para, face);
-  if (wrapped || !line || line.value === 240 || !para.lineHeight || para.runs.some((r) => r.br)) return { line };
+  if (wrapped || !line || line.value === 240 || !para.lineHeight || para.runs.some((r) => r.br)) return { line, studio: para.lineHeight ?? undefined };
   const natural = (face?.lineHeight ?? 1.2) * para.fontSize;
   const step = stacked.get(para);
   if (line.value < 240 || step) {
@@ -1398,6 +1406,8 @@ const renderBand = async (band: LayoutNode[], region: Box, ctx: Ctx): Promise<Ou
     const inside = band.filter((o) => o !== backdrop && contains(backdrop.box, o.box));
     const outside = band.filter((o) => o !== backdrop && !inside.includes(o));
     const children = await renderRegion(inside, backdrop.box, ctx);
+    // Texto em cima da imagem: linha fixa, senão ele anda no Word do Mac (frozenLine).
+    freezeLines(children);
     const table: TIR = {
       kind: 't',
       width: backdrop.box.w,
@@ -1707,9 +1717,24 @@ const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids
     // está na altura da linha (somar de novo esticava o card).
     const at = children.indexOf(only);
     const before = children.slice(0, at).reduce((a, k) => a + (k.kind === 'p' && k.spacer !== undefined ? k.spacer : 0), 0);
+    // Card com pintura própria (branco, arredondado) dentro da faixa: o
+    // respiro da faixa vira linha da cor dela em cima e embaixo — somado à
+    // margem, o card crescia e engolia o azul (os cards da CAIXA).
+    const top = pad[0] + before;
+    const bottom = pad[2];
+    const ownPaint = cells.some((c) => c.round || (c.fill && c.fill !== paint.fill));
+    if (ownPaint && (top >= 1 || bottom >= 1)) {
+      const band = (h: number): TIRRow => ({ height: h, exact: true, cells: [{ width: n.box.w, fill: paint.fill, children: [] }] });
+      return {
+        kind: 't',
+        width: n.box.w,
+        indent: n.box.x - region.x,
+        rows: [...(top >= 1 ? [band(top)] : []), { height: n.box.h - top - bottom, cells }, ...(bottom >= 1 ? [band(bottom)] : [])],
+      };
+    }
     for (const c of cells) {
       const m = c.margins ?? [0, 0, 0, 0];
-      c.margins = [m[0] + pad[0] + before, m[1], m[2] + pad[2], m[3]];
+      c.margins = [m[0] + top, m[1], m[2] + bottom, m[3]];
     }
     return { kind: 't', width: n.box.w, indent: n.box.x - region.x, rows: [{ height: n.box.h, cells }] };
   }
@@ -2116,6 +2141,8 @@ const renderComplex = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<O
   const box = { x: tx, y: area.y, w: Math.max(1, Math.min(right(area), right(region)) - tx), h: area.h };
   const cols = bands(texts, 'x');
   const children = !texts.length ? [] : cols.length > 1 ? withGap([await renderColumns(cols, box, ctx, [])], union(texts).y - box.y) : await renderRegion(texts, box, ctx);
+  // Texto em cima da captura: linha fixa, senão ele anda no Word do Mac (frozenLine).
+  if (textOverArt) freezeLines(children);
   return [
     {
       kind: 't',
@@ -2185,6 +2212,8 @@ const toRuns = (p: PIR): ParagraphChild[] =>
 
 /** Altura em px da linha Simples de uma fonte de 1 meio-ponto no corpo (medida da fonte do Normal). */
 let simpleRatio = 1.2;
+/** Tamanho da fonte do Normal (meio-ponto). */
+let bodyHalf = 20;
 /** Parágrafo sem texto: meio-ponto da fonte cuja linha Simples dá a altura pedida. */
 const structural = (p: PIR): number | undefined => {
   if (p.runs.some((r) => r.kind === 'text') || p.numbering) return undefined;
@@ -2195,10 +2224,47 @@ const structural = (p: PIR): number | undefined => {
   return Math.max(2, Math.min(144, Math.round((px / simpleRatio) * 1.5)));
 };
 
+/**
+ * Capa (arte no cabeçalho, texto por cima): a linha "automática" vira fixa,
+ * com a altura que a Simples do Windows daria. O Word do Mac mede a Simples
+ * por outra métrica da fonte (Work Sans 1,17 × 1,45) e o texto subia em
+ * relação à arte, até ~60px no pé da página. Fixa, a capa sai igual nos
+ * dois; o resto do documento segue em Simples/Múltiplos (padrão da equipe).
+ */
+const frozenLine = (p: PIR): number | null => {
+  // Vão (parágrafo sem texto com a altura pedida): a altura é ela mesma.
+  if (!p.runs.length && p.line && p.line.rule !== 'auto') return p.line.value / 15;
+  // Várias linhas (ou Simples): a entrelinha do Studio — o fator da
+  // Múltiplos para em 0,8 e o título apertado ficava mais alto que lá.
+  if (p.studio && p.runs.some((r) => r.kind === 'text') && p.line?.rule === 'auto') return p.studio;
+  let natural = 0;
+  for (const r of p.runs) {
+    if (r.kind === 'text') natural = Math.max(natural, (r.face?.lineHeight ?? simpleRatio) * (halfPt(r.run.size) / 1.5));
+    else if (r.kind === 'img') natural = Math.max(natural, r.h);
+  }
+  if (p.mark) natural = Math.max(natural, (p.mark.face?.lineHeight ?? simpleRatio) * (halfPt(p.mark.run.size) / 1.5));
+  // Sem texto: a fonte da marca (structural) ou, sem ela, a do Normal.
+  if (!natural) natural = ((structural(p) ?? bodyHalf) / 1.5) * simpleRatio;
+  // Só a automática tem fator; as outras regras saem como Simples (toParagraph).
+  return (natural * (p.line?.rule === 'auto' ? p.line.value : 240)) / 240;
+};
+
+/** Tabela da capa (os parágrafos dela têm entrelinha fixa). */
+const frozenTable = (t: TIR): boolean => t.rows.some((r) => r.cells.some((c) => c.children.some((k) => k.kind === 'p' ? k.frozen : frozenTable(k))));
+
+/** Marca os parágrafos (também os de dentro das tabelas) com entrelinha fixa. */
+const freezeLines = (items: OutIR[]): void => {
+  for (const item of items) {
+    if (item.kind === 'p') item.frozen = true;
+    else for (const row of item.rows) for (const cell of row.cells) freezeLines(cell.children);
+  }
+};
+
 const toParagraph = (p: PIR): Paragraph => {
   if (p.blank) return new Paragraph({ children: p.bookmark ? [new Bookmark({ id: p.bookmark, children: [] })] : [] });
   const children = p.back === undefined ? toRuns(p) : [new TextRun({ text: '', style: `LexRoundBack-${p.back}` }), ...toRuns(p)];
   const body = p.bookmark ? [new Bookmark({ id: p.bookmark, children })] : children;
+  const frozen = p.frozen ? frozenLine(p) : null;
   return new Paragraph({
     // Propriedade "quebra de página antes" (não um caractere de quebra): se a
     // página anterior já encheu, não sobra uma página em branco.
@@ -2213,9 +2279,10 @@ const toParagraph = (p: PIR): Paragraph => {
     spacing: {
       before: tw(p.spaceBefore ?? 0),
       after: tw(p.spaceAfter ?? 0),
-      // Sempre automática (Simples/Múltiplos) — nunca fixa nem "pelo menos".
-      line: p.line?.rule === 'auto' ? p.line.value : 240,
-      lineRule: LineRuleType.AUTO,
+      // Automática (Simples/Múltiplos) — nunca fixa nem "pelo menos" — fora da capa.
+      ...(frozen !== null
+        ? { line: Math.max(MIN_LINE, tw(frozen)), lineRule: LineRuleType.EXACT }
+        : { line: p.line?.rule === 'auto' ? p.line.value : 240, lineRule: LineRuleType.AUTO }),
     },
     numbering: p.numbering ? { reference: p.numbering.ref, level: p.numbering.level, ...(p.numbering.instance ? { instance: p.numbering.instance } : {}) } : undefined,
     border:
@@ -2284,12 +2351,21 @@ const toBlocks = (items: OutIR[], body = false): (Paragraph | Table)[] => {
     const prev = items[i - 1];
     if (prev?.kind === 't') {
       const sep: PIR = body ? { kind: 'p', runs: [], blank: true } : spacer(0.5);
+      if (frozenTable(prev) && frozenTable(item)) Object.assign(sep, { blank: undefined, frozen: true });
       out.push(toParagraph(sep));
     }
     out.push(toTable(item));
   });
   return out;
 };
+
+/**
+ * Montando o cabeçalho: a pílula do menu vira forma com o texto dentro (o
+ * plano B não serve lá — no Word do Mac a imagem de fundo do cabeçalho
+ * cobre a forma atrás do texto, seja qual for a ordem). O cabeçalho não
+ * cresce nem quebra página, então peça pequena também pode.
+ */
+let inHeader = false;
 
 /** Profundidade de formas arredondadas: o Word não aceita caixa de texto dentro de caixa de texto. */
 let roundDepth = 0;
@@ -2389,7 +2465,7 @@ const roundCell = (cell: CellIR, height: number, span: number): TableCell => {
     top = back + TAIL;
     inner = box(top, true);
   }
-  roundShapes.push({ w: cell.width, h: height, radius: cell.round!.radius, adj, fill: cell.fill, line, shadow: cell.round!.shadow, inset: [ml - back, mr - back, top - back, 0] });
+  roundShapes.push({ w: cell.width, h: height, radius: cell.round!.radius, adj, fill: cell.fill, line, shadow: cell.round!.shadow, inset: [ml - back, mr - back, top - back, 0], flush: inHeader || undefined });
   roundDepth++;
   const table = toTable(inner);
   roundDepth--;
@@ -2452,7 +2528,7 @@ const toTable = (t: TIR): Table => {
             // parágrafo da forma soma alguns px, e em página cheia empurrava a
             // última linha pra folha seguinte. O resto vai pelo plano B (forma
             // atrás da célula); dentro de caixa de texto, nem ele — fica reto.
-            if (card.round && roundDepth === 0 && !card.vmerge && (row.height ?? 0) >= 28 && row.height! <= pageRoom && roundable(card)) return roundCell(card, row.height!, span);
+            if (card.round && roundDepth === 0 && !card.vmerge && (row.height ?? 0) >= (inHeader ? 4 : 28) && row.height! <= pageRoom && roundable(card)) return roundCell(card, row.height!, span);
             const tall = card.vmerge === 'restart' ? mergedHeight(t, ri, from) : row.height ?? 0;
             const backed = card.round && roundDepth === 0 && !shaded && !card.backdrop && card.vmerge !== 'continue' && tall >= 4 && tall <= pageRoom ? backCell(card, tall) : undefined;
             if (card.vmerge === 'restart') backedMerge.delete(from);
@@ -2506,11 +2582,14 @@ const toTable = (t: TIR): Table => {
               const last = items[items.length - 1];
               if (last?.kind === 'p') last.spaceAfter = 0;
             }
-            if (mt >= 0.5) items = [spacer(mt), ...items];
+            // Célula de linha fixa (capa, texto sobre arte): os vãos daqui também.
+            const frozen = items.some((k) => k.kind === 'p' && k.frozen);
+            const gap = (px: number): PIR => ({ ...spacer(px), frozen: frozen || undefined });
+            if (mt >= 0.5) items = [gap(mt), ...items];
             if (mb >= 0.5) {
               const last = items[items.length - 1];
               if (last?.kind === 'p' && !last.spacer && !last.blank) last.spaceAfter = (last.spaceAfter ?? 0) + mb;
-              else items = [...items, spacer(mb)];
+              else items = [...items, gap(mb)];
             }
             // Dentro da caixa de texto do card arredondado o Word ignora a
             // margem da célula pra tabela aninhada: o recuo vai na tabela.
@@ -2532,7 +2611,7 @@ const toTable = (t: TIR): Table => {
             if (artCentered && items.every((k) => k.kind === 'p' && !k.runs.length && !k.bookmark)) children.splice(0, children.length);
             if (cell.backdrop) children.unshift(backdropParagraph(cell.backdrop, artCentered));
             // Célula tem que terminar em parágrafo.
-            if (!children.length || children[children.length - 1] instanceof Table) children.push(toParagraph(spacer(0.5)));
+            if (!children.length || children[children.length - 1] instanceof Table) children.push(toParagraph(gap(0.5)));
             return new TableCell({
               width: { size: tw(cell.width), type: WidthType.DXA },
               ...(span > 1 ? { columnSpan: span } : {}),
@@ -2715,6 +2794,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
   const [bodyFamily, bodySizeHalf, bodyLinePx] = ([...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'Arial|20|18').split('|');
   const bodyLine = Number(bodyLinePx) || 18;
   simpleRatio = fonts.resolve(bodyFamily, 400, false)?.lineHeight ?? 1.2;
+  bodyHalf = Number(bodySizeHalf) || 20;
 
   type SectionIR = {
     gi: number;
@@ -2785,7 +2865,9 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
       markStacks(texts);
       if (texts.length) {
         const top = pageTop(group.pages[0]);
-        body.push(...(await renderRegion(texts, { x: pad.left, y: top + marginTop, w: pageW - pad.left - pad.right, h: pageH }, ctx)));
+        const cover = await renderRegion(texts, { x: pad.left, y: top + marginTop, w: pageW - pad.left - pad.right, h: pageH }, ctx);
+        freezeLines(cover);
+        body.push(...cover);
         // Folga pro parágrafo da quebra de página caber ainda na capa.
         coverBottom.set(gi, Math.max(0, top + pageH - bottom(union(texts)) - 8));
       }
@@ -2934,6 +3016,8 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
     if (nav) {
       headerDistance = Math.max(0, nav.tree.box.y - pageTop(group.pages[0]));
       navIR = await renderRegion([nav.tree], { x: pad.left, y: nav.tree.box.y, w: pageW - pad.left - pad.right, h: nav.tree.box.h }, ctx);
+      // Texto em cima das pílulas: linha fixa (frozenLine).
+      freezeLines(navIR);
     }
 
     const withFooter = group.pages.find((i) => layout.pages[i]?.footer?.number);
@@ -2998,6 +3082,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
       overflowChildren?.push(...atTop.blocks());
     }
     if (sec.nav.length) {
+      inHeader = true;
       const navBlocks = toBlocks(sec.nav);
       headerChildren.push(...navBlocks);
       if (navBlocks[navBlocks.length - 1] instanceof Table) headerChildren.push(toParagraph(spacer(0.5)));
@@ -3006,6 +3091,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
         overflowChildren.push(...again);
         if (again[again.length - 1] instanceof Table) overflowChildren.push(toParagraph(spacer(0.5)));
       }
+      inHeader = false;
     }
     return {
       properties: {
