@@ -58,7 +58,9 @@ export type Para = {
   lineHeight: number | null;
   fontSize: number;
   runs: Run[];
-  list?: { kind: string; level: number };
+  /** `group`: lista do Figma (span data-list-item) — itens do mesmo grupo
+   *  continuam a numeração; grupo novo recomeça em 1. */
+  list?: { kind: string; level: number; group?: number };
   /** Item de lista: onde o texto começa (px, página) e o vão do marcador antes dele. */
   x?: number;
   indent?: number;

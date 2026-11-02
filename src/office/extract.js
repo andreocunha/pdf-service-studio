@@ -11,6 +11,10 @@
   const TRANSPARENT = /^(transparent|rgba\([^)]*,\s*0\))$/;
   const INLINE = new Set(['inline', 'inline-block', 'contents']);
   let nextId = 0;
+  /** Envoltório de cada lista do Figma → número da lista (numeração do Word). */
+  const listGroups = new Map();
+  /** Nível no Word de cada item de lista do Figma já visto. */
+  const listLevels = new Map();
 
   const box = (el) => {
     const r = el.getBoundingClientRect();
@@ -458,6 +462,44 @@
         return;
       }
       const href = node.tagName === 'A' ? node.getAttribute('data-block-ref') || node.getAttribute('href') : null;
+      if (node.hasAttribute('data-list-item')) {
+        // Lista vinda do Figma (zona editável do Studio): o item é um <span>
+        // em bloco — a zona não aceita <ul>/<li>. Bolinha é desenhada no fundo
+        // do span, número é o contador nativo (display: list-item); o subnível
+        // fica DENTRO do item pai, então o nível é quantos itens o contêm.
+        current = null;
+        // Nível no Word: um abaixo do item pai (já visto, porque o pai vem
+        // antes na caminhada).
+        const parentItem = node.parentElement && node.parentElement.closest('[data-list-item]');
+        let level = parentItem && el.contains(parentItem) && listLevels.has(parentItem) ? listLevels.get(parentItem) + 1 : 0;
+        // Lista = envoltório onde o Studio reinicia a contagem. Subnível de
+        // item numerado é a mesma lista (o Word reinicia o nível de baixo
+        // quando o de cima avança); debaixo de bolinha, cada sublista é uma
+        // lista própria. No Word, uma numeração por lista, recomeçando em 1.
+        let groupEl = node.parentElement;
+        for (let parentItem = groupEl && groupEl.parentElement; parentItem && parentItem !== el
+          && parentItem.hasAttribute('data-list-item') && getComputedStyle(parentItem).display === 'list-item';
+          parentItem = groupEl && groupEl.parentElement) {
+          groupEl = parentItem.parentElement;
+        }
+        if (!listGroups.has(groupEl)) listGroups.set(groupEl, listGroups.size + 1);
+        const kind = cs.display === 'list-item' ? cs.listStyleType || 'decimal' : 'bullet';
+        // O Studio escolhe o formato pelo nível do Figma (1. → a. → i.), que
+        // pode começar recuado ou pular nível: no Word, o nível é o menor que
+        // dá o mesmo formato sem ficar acima do aninhamento.
+        const cycle = ['decimal', 'lower-alpha', 'lower-roman'].indexOf(kind);
+        if (cycle >= 0) level += (cycle - (level % 3) + 3) % 3;
+        listLevels.set(node, level);
+        const item = { kind, level, group: listGroups.get(groupEl) };
+        open(node, item);
+        const c = contentBox(node);
+        current.x = c.x;
+        current.indent = Math.max(0, c.x - box(node.parentElement).x);
+        if (item.kind === 'bullet') current.marker = { color: color(cs.color) || undefined };
+        [...node.childNodes].forEach((ch) => walk(ch, item, href || linkRef));
+        current = null;
+        return;
+      }
       if (node.tagName === 'UL' || node.tagName === 'OL') {
         const depth = list ? list.level + 1 : 0;
         const kind = node.tagName === 'OL' ? cs.listStyleType || 'decimal' : 'bullet';

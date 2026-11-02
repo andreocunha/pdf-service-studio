@@ -161,6 +161,8 @@ type Ctx = {
   /** Sequência em andamento: o próximo "ii)" continua a lista do "i)". */
   seq: { key: string; value: number; instance: number } | null;
   instances: number;
+  /** Lista do Figma (grupo do extrator) → instância da numeração: cada lista recomeça em 1. */
+  figmaLists: Map<number, number>;
   /** Onde a numeração de cláusulas do Word está (1.2.3 → [1, 2, 3]). */
   clauses: number[];
   /** Instância da numeração de cláusulas: muda quando o Studio recomeça em 1 (anexo). */
@@ -1037,6 +1039,23 @@ const parseMarker = (token: string, ctx: Ctx): { format: ListFormat; value: numb
 };
 
 /**
+ * Numeração do item de lista. <ul>/<ol> usam as listas genéricas. Lista do
+ * Figma (com `group`) numerada: a mesma sequência de formatos do Studio por
+ * nível (1. → a. → i.) e uma instância por lista, que recomeça em 1 como lá.
+ */
+const listNumbering = (list: NonNullable<Para['list']>, ctx: Ctx): PIR['numbering'] => {
+  const level = Math.min(list.level, 8);
+  if (list.kind === 'bullet') return { ref: 'bullet', level };
+  if (list.group === undefined) return { ref: 'decimal', level };
+  let instance = ctx.figmaLists.get(list.group);
+  if (instance === undefined) {
+    instance = ++ctx.instances;
+    ctx.figmaLists.set(list.group, instance);
+  }
+  return { ref: 'figma-ordered', level, instance };
+};
+
+/**
  * Parágrafo que começa com marcador de lista: tira o marcador do texto e
  * devolve a numeração (instância nova quando a sequência recomeça no 1).
  * Marcador fora de sequência (pulou número) fica como texto.
@@ -1175,7 +1194,7 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
       indentRight: oneLine(para.align)?.right ?? indentRight,
       ...oneLineSpacing(para, firstFace, wrapped),
       mark: first ? { run: first, face: firstFace } : undefined,
-      numbering: para.list ? { ref: para.list.kind === 'bullet' ? 'bullet' : 'decimal', level: Math.min(para.list.level, 8) } : undefined,
+      numbering: para.list ? listNumbering(para.list, ctx) : undefined,
     });
   });
   if (out.length && !node.autonumber && !manualClause(node, out[0], ctx)) takeMarker(out[0], ctx);
@@ -2639,7 +2658,7 @@ export type BuildInput = {
 };
 
 export const buildDocument = async ({ layout, fonts, assets, background, coverPages }: BuildInput) => {
-  const ctx: Ctx = { fonts, assets, used: new Set(), pending: [], usage: new Map(), lists: new Map(), seq: null, instances: 0, clauses: [], clauseFormats: [] };
+  const ctx: Ctx = { fonts, assets, used: new Set(), pending: [], usage: new Map(), lists: new Map(), seq: null, instances: 0, figmaLists: new Map(), clauses: [], clauseFormats: [] };
   const { meta } = layout;
   const pageW = meta.pageWidthPx;
   const pageH = meta.pageHeightPx;
@@ -3080,6 +3099,17 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
             text: level % 2 ? '◦' : '•',
             alignment: AlignmentType.LEFT,
             style: { paragraph: { indent: { left: 360 * (level + 1), hanging: 240 } } },
+          })),
+        },
+        {
+          // Lista numerada do Figma: formatos do Studio por nível (text-builder.ts, ORDERED_STYLES).
+          reference: 'figma-ordered',
+          levels: Array.from({ length: 9 }, (_, level) => ({
+            level,
+            format: [LevelFormat.DECIMAL, LevelFormat.LOWER_LETTER, LevelFormat.LOWER_ROMAN][level % 3],
+            text: `%${level + 1}.`,
+            alignment: AlignmentType.LEFT,
+            style: { paragraph: { indent: { left: 360 * (level + 1), hanging: 300 } } },
           })),
         },
         {
