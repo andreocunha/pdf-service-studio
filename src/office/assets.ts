@@ -211,10 +211,12 @@ export const makeAssets = (page: Page, signal?: AbortSignal): Assets => {
     if (!el) return null;
     await page.evaluate(`(() => {
       const target = document.querySelector('[data-dx="${id}"]');
+      // O que já estava escondido continua escondido (texto oculto não aparece na captura).
+      const was = new Map([...target.querySelectorAll('*')].map((e) => [e, getComputedStyle(e).visibility]));
       const set = (e, v) => { if (!e.hasAttribute('data-dx-vis')) e.setAttribute('data-dx-vis', e.style.visibility); e.style.visibility = v; };
       for (const e of document.querySelectorAll('body *')) set(e, 'hidden');
       set(target, 'visible');
-      for (const e of target.querySelectorAll('*')) set(e, ${alone} ? 'hidden' : 'visible');
+      for (const e of target.querySelectorAll('*')) set(e, ${alone} || was.get(e) !== 'visible' ? 'hidden' : 'visible');
       // A página do PDF força "html, body { background: white !important }": só inline !important ganha.
       for (const e of [document.documentElement, document.body]) { e.setAttribute('data-dx-bg', e.style.background); e.style.setProperty('background', 'transparent', 'important'); }
       if (${mode === 'notext'}) {

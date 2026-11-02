@@ -803,6 +803,7 @@ const nestShapes = (n: LayoutNode): LayoutNode => {
       k: 'box',
       kids: inside,
       layout: { display: 'block', dir: 'row', alignItems: 'normal', justify: 'normal', textAlign: 'left' },
+      nested: true,
     } as LayoutNode;
     // No lugar da forma: a ordem de empilhamento continua a mesma.
     kids = kids.flatMap((k) => (k === shape ? [box] : inside.includes(k) ? [] : [k]));
@@ -945,12 +946,16 @@ const overflow = (k: Box, n: Box) => Math.max(n.x - k.x, n.y - k.y, right(k) - r
  * lado a lado, linha embaixo) continua tabela nativa — a linha vira borda.
  */
 const complexRoot = (n: LayoutNode): boolean => {
-  if (n.k !== 'box' || !n.kids.some((k) => k.abs)) return false;
+  if (n.k !== 'box') return false;
   const kids = n.kids;
   // Compara o que se vê (textos, selos, fundos), não as caixas invisíveis que
   // embrulham: o ícone no canto vazio de um card não é sobreposição.
   const seen = (k: LayoutNode) => leaves([k]).filter((l) => !isLine(l));
-  if (kids.some((a, i) => kids.some((b, j) => j > i && (a.abs || b.abs) && seen(a).some((x) => seen(b).some((y) => overlaps(x.box, y.box)))))) return true;
+  const overlapping = (loose: boolean) => kids.some((a, i) => kids.some((b, j) => j > i && (loose || a.abs || b.abs) && seen(a).some((x) => seen(b).some((y) => overlaps(x.box, y.box)))));
+  // Linha flex com peças encavaladas por margem negativa (o "+" e o "=" em
+  // cima das bordas dos cards da CAIXA): fatiar em tabela virava escada.
+  if (!kids.some((k) => k.abs)) return /flex/.test(n.layout.display) && !/column/.test(n.layout.dir) && overlapping(true);
+  if (overlapping(false)) return true;
   // Composição livre do Figma: todas as peças soltas, com texto E desenho
   // solto (barra de progresso, pinos, ícones) — fatiar em tabela perdia os
   // desenhos (a barra e as legendas do "Análise de crédito" sumiam).
@@ -1328,7 +1333,7 @@ const renderRegion = async (nodes: LayoutNode[], region: Box, ctx: Ctx): Promise
     const inside = items.filter((n) => n !== shape && contains(shape.box, n.box));
     if (inside.length) {
       items = items.filter((n) => !inside.includes(n) && n !== shape);
-      items.push({ ...(shape as Extract<LayoutNode, { k: 'shape' }>), k: 'box', kids: inside, layout: { display: 'block', dir: 'row', alignItems: 'normal', justify: 'normal', textAlign: 'left' } });
+      items.push({ ...(shape as Extract<LayoutNode, { k: 'shape' }>), k: 'box', kids: inside, layout: { display: 'block', dir: 'row', alignItems: 'normal', justify: 'normal', textAlign: 'left' }, nested: true } as LayoutNode);
     }
   }
   const out: OutIR[] = [];
@@ -1804,6 +1809,11 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
   const lines: { box: Box; color: string }[] = [];
   let z = 0;
   let fail = false;
+  // Caixa montada pelo gerador (`nested`: nestShapes, renderRegion, blocos
+  // emendados) só existe na árvore: no DOM os ícones
+  // são irmãos dela e a captura pelo id os esconderia. Com ela na composição,
+  // gradiente fica como cor (o de sempre) em vez de desistir da grade.
+  const synthetic = everyNode(tree).some((k) => (k as { nested?: boolean }).nested);
   const walk = (n: LayoutNode): void => {
     if (fail) return;
     if (n.k === 'text' || n.k === 'img' || n.k === 'raster') {
@@ -1813,12 +1823,18 @@ const gridCompose = async (tree: LayoutNode, region: Box, ctx: Ctx): Promise<Out
     if (n.k === 'shape') {
       const fill = (n as { fill?: string }).fill;
       if (isLine(n)) lines.push({ box: n.box, color: fill ?? '000000' });
-      else if (n.bgImage) fail = true;
+      // Gradiente/sombra (o brilho laranja no canto do card escuro): o Word
+      // não pinta — virava célula de cor lisa. Vai capturado como arte.
+      else if (n.bgImage || (n.paint && !synthetic)) fail = true;
       else rects.push({ box: n.box, fill, border: n.border as CellIR['borders'], z: z++ });
       return;
     }
     if (n.k !== 'box') return;
-    if (n.bgImage || (n.paint && !n.fill)) {
+    // Gradiente/sombra numa caixa também (com ou sem cor de reserva): na
+    // grade virava cor lisa.
+    // Fundo que veio de forma (nestShapes) só existe na árvore — no DOM os
+    // ícones são irmãos dele, e a captura pelo id os esconderia: fica a cor.
+    if (n.bgImage || (n.paint && !(n.fill && synthetic))) {
       fail = true;
       return;
     }
@@ -2255,7 +2271,16 @@ const frozenLine = (p: PIR): number | null => {
   if (!p.runs.length && p.line && p.line.rule !== 'auto') return p.line.value / 15;
   // Várias linhas (ou Simples): a entrelinha do Studio — o fator da
   // Múltiplos para em 0,8 e o título apertado ficava mais alto que lá.
-  if (p.studio && p.runs.some((r) => r.kind === 'text') && p.line?.rule === 'auto') return p.studio;
+  if (p.studio && p.runs.some((r) => r.kind === 'text') && p.line?.rule === 'auto') {
+    // Várias linhas com um trecho bem maior (destaque de 48px num texto de
+    // 16px): a linha do Studio cresce só ali — a fixa cortaria. Fica automática.
+    const sizes = p.runs.flatMap((r) => (r.kind === 'text' ? [halfPt(r.run.size)] : []));
+    if (Math.max(...sizes) > 1.15 * Math.min(...sizes)) return null;
+    // Entrelinha do Studio bem menor que a letra (o parágrafo é de 16px e o
+    // texto todo de 48px): a fixa cortaria.
+    if (p.studio < (0.75 * Math.max(...sizes)) / 1.5) return null;
+    return p.studio;
+  }
   let natural = 0;
   for (const r of p.runs) {
     if (r.kind === 'text') natural = Math.max(natural, (r.face?.lineHeight ?? simpleRatio) * (halfPt(r.run.size) / 1.5));
@@ -2283,7 +2308,12 @@ const toParagraph = (p: PIR): Paragraph => {
   if (p.blank) return new Paragraph({ children: p.bookmark ? [new Bookmark({ id: p.bookmark, children: [] })] : [] });
   const children = p.back === undefined ? toRuns(p) : [new TextRun({ text: '', style: `LexRoundBack-${p.back}` }), ...toRuns(p)];
   const body = p.bookmark ? [new Bookmark({ id: p.bookmark, children })] : children;
-  const frozen = p.frozen ? frozenLine(p) : null;
+  // Dentro da caixa de texto do card arredondado, múltiplo < 1 corta o topo
+  // das letras ("14.800" no card branco): vai com a entrelinha fixa.
+  // Só linha única (`studio` marca o de várias linhas): a fixa vem do maior
+  // trecho da linha; em várias linhas ela é a do Studio e cortaria um trecho maior.
+  const tightInRound = roundDepth > 0 && !p.studio && p.line?.rule === 'auto' && p.line.value < 240 && p.runs.some((r) => r.kind === 'text') && !p.runs.some((r) => r.kind === 'br');
+  const frozen = p.frozen || tightInRound ? frozenLine(p) : null;
   return new Paragraph({
     // Propriedade "quebra de página antes" (não um caractere de quebra): se a
     // página anterior já encheu, não sobra uma página em branco.
@@ -2925,7 +2955,7 @@ export const buildDocument = async ({ layout, fonts, assets, background, coverPa
           const content = everyNode(next!.tree!).filter((n) => n.k === 'text' || n.k === 'img' || n.k === 'raster');
           const nextRight = content.length ? Math.max(...content.map((n) => (n.k === 'text' && n.inkRight ? n.inkRight : right(n.box)))) : right(nextArea);
             if (bottom(hanging.box) > bottom(own) + 16 && nextArea.y < bottom(hanging.box) && nextRight <= hanging.box.x + 1) {
-            tree = { ...(rest as Extract<LayoutNode, { k: 'box' }>), k: 'box', kids: [rest, next!.tree!, hanging], layout: { display: 'block', dir: 'row', alignItems: 'normal', justify: 'normal', textAlign: 'left' } } as LayoutNode;
+            tree = { ...(rest as Extract<LayoutNode, { k: 'box' }>), k: 'box', kids: [rest, next!.tree!, hanging], layout: { display: 'block', dir: 'row', alignItems: 'normal', justify: 'normal', textAlign: 'left' }, nested: true } as LayoutNode;
             joined = next;
             bi++;
           }

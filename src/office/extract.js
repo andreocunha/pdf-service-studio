@@ -633,6 +633,36 @@
       el.setAttribute('data-dx', String(nextId));
       return { k: 'raster', id: nextId++, box: b, abs };
     }
+    // Peça girada com texto (o selo "Aprovado pelo conselho" da capa): o
+    // Word não gira texto — saía reto e com a altura das linhas, não a da
+    // caixa girada, puxando tudo de baixo pra cima. Vai capturada inteira.
+    // Só se tudo cabe na caixa e nada está escondido: a captura é a caixa e
+    // mostra o que estiver dentro — senão cortaria o que vaza ou revelaria o
+    // que está oculto (aí segue o caminho comum).
+    const inside = (r) => r.x >= b.x - 1 && r.y >= b.y - 1 && r.x + r.w <= b.x + b.w + 1 && r.y + r.h <= b.y + b.h + 1;
+    const textFits = () => {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+        if (!t.textContent.trim()) continue;
+        const range = document.createRange();
+        range.selectNodeContents(t);
+        for (const q of range.getClientRects()) if (!inside({ x: q.left + window.scrollX, y: q.top + window.scrollY, w: q.width, h: q.height })) return false;
+      }
+      return true;
+    };
+    const fits = () =>
+      textFits() &&
+      [...el.querySelectorAll('*')].every((k) => {
+        const ks = getComputedStyle(k);
+        if (ks.display === 'none') return true;
+        if (ks.visibility !== 'visible' || Number(ks.opacity) === 0) return false;
+        const r = box(k);
+        return (r.w < 0.5 && r.h < 0.5) || inside(r);
+      });
+    if (el !== root && turned(el) && !turned(el.parentElement) && el.textContent.trim() && fits()) {
+      el.setAttribute('data-dx', String(nextId));
+      return { k: 'raster', id: nextId++, box: b, abs };
+    }
     // Bloco aninhado (colunas): desce no conteúdo dele.
     if (el !== root && el.hasAttribute('data-block-id')) return blockContent(el);
 
