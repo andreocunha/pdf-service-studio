@@ -147,7 +147,13 @@ type CellIR = {
   want?: number;
   children: OutIR[];
 };
-type TIRRow = { height?: number; cells: CellIR[]; exact?: boolean };
+/**
+ * `fit`: no Studio o conteúdo já ocupa a altura toda da linha — no Word ela
+ * sai sem altura definida ("Especificar altura" desmarcado), pra crescer e
+ * encolher com o texto. Sem `fit` (sobra embaixo, altura mínima, conteúdo
+ * centralizado), a altura do Studio fica como "Pelo menos".
+ */
+type TIRRow = { height?: number; cells: CellIR[]; exact?: boolean; fit?: boolean };
 type TIR = { kind: 't'; width: number; indent: number; rows: TIRRow[] };
 type OutIR = PIR | TIR;
 
@@ -332,7 +338,11 @@ const flattenGrid = (t: TIR): TIR => {
   const tall = (x: TIR) => x.rows.reduce((a, r) => a + (r.height ?? 0), 0);
   // Card com várias linhas (cabeçalho + corpo) pode ser um pouco mais baixo que o vizinho.
   if (!outer.height || nested.some((x) => x && tall(x) < outer.height! * (n > 1 ? 0.8 : 1) - 2)) return t;
-  const rows = Array.from({ length: n }, (_, r) => ({ height: Math.max(0, ...nested.map((x) => x?.rows[r].height ?? 0)) || undefined, cells: [] as CellIR[] }));
+  const rows = Array.from({ length: n }, (_, r): TIRRow => ({
+    height: Math.max(0, ...nested.map((x) => x?.rows[r].height ?? 0)) || undefined,
+    fit: outer.fit && nested.every((x) => !x || x.rows[r].fit),
+    cells: [] as CellIR[],
+  }));
   // A última linha completa a altura da linha de fora (coluna mais alta que a soma das de dentro).
   const inner = rows.slice(0, -1).reduce((a, r) => a + (r.height ?? 0), 0);
   if (outer.height) rows[n - 1].height = Math.max(rows[n - 1].height ?? 0, outer.height - inner);
@@ -414,7 +424,7 @@ const unwrap = (t: TIR): TIR => {
         ...(ci === cells.length - 1 && b.right ? { right: b.right } : {}),
       };
     });
-    return { ...r, cells };
+    return { ...r, cells, fit: r.fit && t.rows[0].fit };
   });
   // Grade de várias linhas (composição do Figma): o espaço interno da caixa
   // de fora vira uma linha vazia em cima e outra embaixo — somado à primeira
@@ -455,6 +465,8 @@ const unwrap = (t: TIR): TIR => {
 const inlineCells = (t: TIR): TIR => {
   const rows = t.rows.map((row) => {
     const cells: CellIR[] = [];
+    // Tabela de dentro que entra na linha: a altura dela (se fixa) passa a ser a da linha.
+    let fit = row.fit;
     for (const c of row.cells) {
       const real = c.children.filter((k) => !(k.kind === 'p' && (k.spacer !== undefined || isEmptyP(k)) && !k.bookmark));
       const inner = real.length === 1 && real[0].kind === 't' && real[0].rows.length === 1 ? real[0] : null;
@@ -488,6 +500,7 @@ const inlineCells = (t: TIR): TIR => {
           backdrop: ic.backdrop ? { ...ic.backdrop, x: (ic.backdrop.x ?? 0) + dx, y: (ic.backdrop.y ?? 0) + before } : undefined,
           children: [...c.children.slice(0, at), ...ic.children, ...c.children.slice(at + 1)],
         });
+        fit = fit && inner.rows[0].fit;
         continue;
       }
       if (!inner || c.backdrop || c.vmerge || keepsRound(c) || inner.rows[0].cells.some((k) => k.vmerge)) {
@@ -518,8 +531,9 @@ const inlineCells = (t: TIR): TIR => {
         };
       });
       cells.push(...got);
+      fit = fit && inner.rows[0].fit;
     }
-    return { ...row, cells };
+    return { ...row, cells, fit };
   });
   return { ...t, rows };
 };
@@ -1478,6 +1492,9 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
   const cells: CellIR[] = [];
   const rowBottom = Math.max(...boxes.map(bottom));
   const rowTop = Math.min(...boxes.map((b) => b.y));
+  // A linha sai sem altura se as colunas que chegam ao pé dela terminam no
+  // próprio conteúdo (a coluna mais alta é que dá a altura no Word).
+  let natural = true;
   // Centralizado de verdade só se a geometria diz (folga igual em cima e embaixo).
   const alignOf = (b: Box): CellIR['vAlign'] => {
     const top = b.y - rowTop;
@@ -1506,6 +1523,8 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
       const content = only.kids.length ? union(leaves(only.kids).length ? leaves(only.kids) : only.kids) : inner;
       const top = content.y - inner.y;
       const low = bottom(inner) - bottom(content);
+      // Card com altura própria (mesmo mais baixo que o vizinho): a linha guarda o piso dele.
+      if (!naturalHeight(only, pad)) natural = false;
       cells.push({
         width: only.box.w,
         ...(await paintOf(only as Decorated, pad, ctx)),
@@ -1522,6 +1541,10 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
     // no tamanho dela, e a coluna cresce só o que ela precisa (tirando dos
     // vizinhos). Recortada junto com a bola, a seta saía espremida; com a
     // bola inteira, o vão ficava o dobro do Studio.
+    // Coluna sem pintura: a altura vem das peças de dentro (cada caixa decorada
+    // decide a sua); se elas param antes do pé, a sobra era altura fixa.
+    const flow = col.filter((k) => !k.abs);
+    if (bottom(colBox) >= rowBottom - 3 && (!flow.length || contentBottom(flow) < rowBottom - 3)) natural = false;
     const marks = only && !hasText(only) ? leaves(col).filter((l) => !(l.k === 'shape' && l.box.w > width + 1)) : [];
     const mark = marks.length === 1 && marks[0].k === 'img' ? marks[0] : null;
     if (only && mark && leaves(col).length > 1) {
@@ -1606,7 +1629,7 @@ const renderColumns = async (cols: LayoutNode[][], region: Box, ctx: Ctx, overla
     kind: 't',
     width,
     indent: left - region.x,
-    rows: badgeRows(cells, rowBottom - rowTop),
+    rows: badgeRows(cells, rowBottom - rowTop).map((r) => ({ ...r, fit: natural })),
   };
 };
 
@@ -1715,6 +1738,44 @@ const renderItem = async (n: LayoutNode, region: Box, ctx: Ctx): Promise<OutIR[]
   return renderRegion(n.kids, n.box, ctx);
 };
 
+/**
+ * O conteúdo enche a caixa até o espaço interno de baixo (sem sobra de
+ * altura mínima, sem centralizar numa caixa mais alta): no Word a linha pode
+ * ficar sem altura definida — o tamanho sai do próprio conteúdo.
+ */
+const naturalHeight = (n: Extract<LayoutNode, { k: 'box' | 'text' }>, pad: [number, number, number, number]): boolean => {
+  if (n.k === 'text') return !n.middle && bottom(n.box) - pad[2] - inkBottom(n) <= 3;
+  const flow = n.kids.filter((k) => !k.abs);
+  return Boolean(flow.length) && bottom(n.box) - pad[2] - contentBottom(flow) <= 3;
+};
+
+/** Pé da última linha do texto (a caixa pode ser mais alta: texto centralizado num card esticado). */
+const inkBottom = (n: Extract<LayoutNode, { k: 'text' }>): number => {
+  const lineOf = (p: (typeof n.paras)[number]) => p.lineHeight ?? p.fontSize * 1.2;
+  // Parágrafos vazios no fim (sem linha medida) ainda ocupam uma linha cada.
+  let tail = 0;
+  for (let i = n.paras.length - 1; i >= 0; i--) {
+    const p = n.paras[i];
+    if (p.last) return Math.min(bottom(n.box), p.last + lineOf(p) / 2 + tail);
+    tail += lineOf(p);
+  }
+  // Nada medido: na dúvida, a altura do Studio fica.
+  return -Infinity;
+};
+
+/** Até onde vai o conteúdo de verdade (texto pela última linha; caixa decorada pela própria caixa). */
+const contentBottom = (nodes: LayoutNode[]): number => {
+  // Divisória fina no pé (vira borda do parágrafo, sem o vão até ela) não sustenta a altura.
+  const ls = leaves(nodes).filter((l) => !(l.k === 'shape' && l.box.h <= 3));
+  // Imagem no pé: o Word a desenha na proporção dela, não na caixa (SVG 2:1
+  // numa caixa quadrada fica mais baixo) — a altura do Studio fica.
+  const items = ls.length ? ls : nodes;
+  const ends = items.map((l) => (l.k === 'text' ? inkBottom(l) + (l.pad?.[2] ?? 0) : bottom(l.box)));
+  const low = Math.max(...ends);
+  const lowest = items[ends.indexOf(low)];
+  return lowest && (lowest.k === 'img' || lowest.k === 'raster') ? -Infinity : low;
+};
+
 /** Caixa com fundo/borda/padding → tabela de uma célula. */
 const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids: LayoutNode[], region: Box, ctx: Ctx): Promise<TIR> => {
   const pad = n.k === 'box' ? cellPadding(n.box, n.pad ?? [0, 0, 0, 0], kids) : n.pad ?? [0, 0, 0, 0];
@@ -1725,6 +1786,7 @@ const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids
       : await renderRegion(kids, inner, ctx);
   const layout = n.k === 'box' ? n.layout : null;
   const paint = await paintOf(n as Decorated, pad, ctx);
+  const natural = naturalHeight(n, pad);
   // Caixa pintada cujo conteúdo é só uma linha de colunas (o selo "1" + o
   // título da cláusula): a tabela de dentro vira A tabela — 1 linha, uma
   // célula por elemento — e o fundo da caixa vai pras células sem cor própria.
@@ -1753,14 +1815,14 @@ const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids
         kind: 't',
         width: n.box.w,
         indent: n.box.x - region.x,
-        rows: [...(top >= 1 ? [band(top)] : []), { height: n.box.h - top - bottom, cells }, ...(bottom >= 1 ? [band(bottom)] : [])],
+        rows: [...(top >= 1 ? [band(top)] : []), { height: n.box.h - top - bottom, cells, fit: natural && only.rows[0].fit }, ...(bottom >= 1 ? [band(bottom)] : [])],
       };
     }
     for (const c of cells) {
       const m = c.margins ?? [0, 0, 0, 0];
       c.margins = [m[0] + top, m[1], m[2] + bottom, m[3]];
     }
-    return { kind: 't', width: n.box.w, indent: n.box.x - region.x, rows: [{ height: n.box.h, cells }] };
+    return { kind: 't', width: n.box.w, indent: n.box.x - region.x, rows: [{ height: n.box.h, cells, fit: natural && only.rows[0].fit }] };
   }
   return {
     kind: 't',
@@ -1769,6 +1831,7 @@ const decoratedCell = async (n: Extract<LayoutNode, { k: 'box' | 'text' }>, kids
     rows: [
       {
         height: n.box.h,
+        fit: natural,
         cells: [
           {
             width: n.box.w,
@@ -2564,11 +2627,17 @@ const toTable = (t: TIR): Table => {
       top: border(), bottom: border(), left: border(), right: border(), insideHorizontal: border(), insideVertical: border(),
     },
     margins: { top: 0, bottom: 0, left: 0, right: 0 },
-    rows: t.rows.map(
-      (row, ri) =>
-        new TableRow({
+    rows: t.rows.map((row, ri) => {
+      // Linha de texto que no Studio termina no próprio conteúdo: sem altura
+      // definida, cresce e encolhe com a edição (pedido da equipe). Card
+      // arredondado (a forma tem altura própria), arte de fundo e mesclas
+      // continuam com a altura do Studio.
+      const free =
+        row.fit && !row.exact && !inHeader && row.cells.every((c) => !c.round && !c.backdrop && !c.vmerge && !allParagraphs(c.children).some((p) => p.frozen)) &&
+        row.cells.some((c) => allParagraphs(c.children).some((p) => p.runs.some((x) => x.kind === 'text' && x.text.trim())));
+      return new TableRow({
           cantSplit: true,
-          height: row.height ? { value: tw(Math.max(1, row.height)), rule: row.exact ? HeightRule.EXACT : HeightRule.ATLEAST } : undefined,
+          height: row.height && !free ? { value: tw(Math.max(1, row.height)), rule: row.exact ? HeightRule.EXACT : HeightRule.ATLEAST } : undefined,
           children: row.cells.map((card, ci) => {
             const from = row.cells.slice(0, ci).reduce((a, c) => a + tw(c.width), 0);
             const span = spanOf(from, from + tw(card.width));
@@ -2602,7 +2671,8 @@ const toTable = (t: TIR): Table => {
             // Forma atrás (plano B) é ancorada no primeiro parágrafo: posições do
             // Studio, pelo topo, como a arte de fundo.
             const centered = cell.vAlign === 'center' && (!cell.backdrop || artCentered) && !backed;
-            const [mt, , mb] = centered ? [0, 0, 0] : cell.margins ?? [0, 0, 0, 0];
+            // Linha sem altura: o espaço interno é que dá o tamanho — fica mesmo centralizado.
+            const [mt, , mb] = centered && !free ? [0, 0, 0] : cell.margins ?? [0, 0, 0, 0];
             let items = cell.children;
             // Linha apertada dentro de célula: aqui o Word não corta o aperto
             // em cima (no corpo corta) — a letra fica onde ficaria em Simples,
@@ -2622,7 +2692,8 @@ const toTable = (t: TIR): Table => {
               }
               k.tight = undefined;
             });
-            if (centered) {
+            // Linha sem altura: o espaço das pontas é o tamanho da célula, não posição.
+            if (centered && !free) {
               items = items.filter((k, i) => !(k.kind === 'p' && k.spacer !== undefined && (i === 0 || i === items.length - 1) && !k.bookmark));
               // Só nas pontas da célula: o espaço entre uma tabela e o texto
               // de baixo (calendário → "Comunicação em até…") é conteúdo.
@@ -2678,8 +2749,8 @@ const toTable = (t: TIR): Table => {
               children,
             });
           }),
-        }),
-    ),
+        });
+    }),
   });
 };
 
