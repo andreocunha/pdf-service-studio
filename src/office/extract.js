@@ -216,7 +216,10 @@
     const rgb = [m[1], m[2], m[3]].map(Number);
     const hex = (c) => c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
     const mix = (back) => back.map((b, i) => b + (rgb[i] - b) * alpha);
-    const back = alpha >= 0.95 ? [255, 255, 255] : behind(el, self);
+    // Quase opaco: a própria cor (misturar com branco clareava o fundo escuro
+    // e ele deixava de bater com a página).
+    if (alpha >= 0.95) return hex(rgb);
+    const back = behind(el, self);
     if (back) return hex(mix(back));
     // Atrás é imagem: vidro claro (branco translúcido) sairia branco chapado.
     if (alpha < 0.5 && rgb.every((v) => v > 235)) return line ? hex(rgb) : null;
@@ -346,6 +349,22 @@
     const multiNumber = [...el.querySelectorAll('[data-autonumber]')].filter((m) => !m.closest('[data-editor-only]') && (m.checkVisibility ? m.checkVisibility({ visibilityProperty: true, opacityProperty: true }) : true)).length > 1;
     const open = (source, list) => {
       current = { ...paraStyle(source), runs: [], list };
+      // Parágrafo em bloco com barra à esquerda (citação, item "| texto" do
+      // modelo): a barra, o recuo e o espaço em volta vão pro parágrafo do Word.
+      if (!list) {
+        let blk = source && source.nodeType === 1 ? source : null;
+        while (blk && blk !== el && INLINE.has(getComputedStyle(blk).display)) blk = blk.parentElement;
+        if (blk && blk !== el && el.contains(blk)) {
+          const bcs = getComputedStyle(blk);
+          const bw = len(blk, bcs.borderLeftWidth);
+          const bc = bcs.borderLeftStyle !== 'none' && bcs.borderLeftStyle !== 'hidden' ? blend(blk, bcs.borderLeftColor, true) : null;
+          if (bw >= 0.5 && bc) {
+            const b = box(blk);
+            current.rule = { x: b.x, w: bw, color: bc, pad: len(blk, bcs.paddingLeft), style: /dashed|dotted/.test(bcs.borderLeftStyle) ? bcs.borderLeftStyle : undefined };
+            current.gap = [len(blk, bcs.marginTop), len(blk, bcs.paddingTop), len(blk, bcs.paddingBottom), len(blk, bcs.marginBottom)];
+          }
+        }
+      }
       // Item de lista: onde o texto do item começa, e o vão do marcador
       // (padding da lista) — vale também pro <p> dentro do <li>.
       const li = list && source.closest && source.closest('li');

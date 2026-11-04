@@ -69,6 +69,10 @@ export type Para = {
   last?: number;
   /** Altura da área do texto na primeira linha (ascendente + descendente, px). */
   area?: number;
+  /** Barra à esquerda do bloco do parágrafo (px, página): onde começa, espessura, cor e o vão até o texto. */
+  rule?: { x: number; w: number; color: string; pad: number; style?: 'dashed' | 'dotted' };
+  /** Espaço do bloco com barra (px): margem de cima, padding de cima, padding de baixo, margem de baixo. */
+  gap?: [number, number, number, number];
   /** Marcador do item de lista (::marker). */
   marker?: { color: string; alpha?: number; size?: number };
 };

@@ -104,6 +104,8 @@ type PIR = {
   bookmark?: string;
   borderBottom?: Stroke;
   borderTop?: Stroke;
+  /** Barra à esquerda (`space`: vão até o texto; `inner`: padding de cima/baixo dentro dela, px). */
+  borderLeft?: Stroke & { space: number; inner: [number, number] };
   pageBreakBefore?: boolean;
   /** Formatação da marca de parágrafo — é dela que o número automático herda a fonte. */
   mark?: { run: Run; face: Face | null };
@@ -282,7 +284,7 @@ const smallRoundArt = (n: LayoutNode): boolean =>
 const allParagraphs = (items: OutIR[]): PIR[] =>
   items.flatMap((item) => (item.kind === 'p' ? [item] : item.rows.flatMap((r) => r.cells.flatMap((c) => allParagraphs(c.children)))));
 
-const isEmptyP = (k: OutIR) => k.kind === 'p' && !k.runs.length && !k.numbering && !k.bookmark && !k.borderBottom && !k.borderTop;
+const isEmptyP = (k: OutIR) => k.kind === 'p' && !k.runs.length && !k.numbering && !k.bookmark && !k.borderBottom && !k.borderTop && !k.borderLeft;
 const painted = (c: CellIR) => Boolean(c.fill || c.backdrop || c.borders);
 const filler = (width: number): CellIR => ({ width, children: [] });
 
@@ -642,7 +644,8 @@ const without = (n: LayoutNode, drop: Set<LayoutNode>): LayoutNode =>
     : n;
 
 const rgb = (hex: string) => [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));
-const near = (a: string, b: string) => rgb(a).every((v, i) => Math.abs(v - rgb(b)[i]) <= 12);
+// Só arredondamento de cor: cinza bem claro (f5f5f5 no branco) é card de verdade.
+const near = (a: string, b: string) => rgb(a).every((v, i) => Math.abs(v - rgb(b)[i]) <= 3);
 
 /**
  * Cópia da árvore sem fundo da mesma cor da página embaixo (branco em página
@@ -1192,6 +1195,8 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
       : align === 'center'
         ? { left: Math.max(0, indentLeft - slack), right: Math.max(0, rightRoom - slack) }
         : { left: Math.max(0, indentLeft - slack), right: rightRoom };
+  // Margem de baixo do bloco com barra: vai pro que vem depois.
+  let prevAfter = 0;
   node.paras.forEach((para) => {
     const runs: RunIR[] = [];
     let firstFace: Face | null = null;
@@ -1223,6 +1228,28 @@ const textToParagraphs = (node: Extract<LayoutNode, { k: 'text' }>, region: Box,
       mark: first ? { run: first, face: firstFace } : undefined,
       numbering: para.list ? listNumbering(para.list, ctx) : undefined,
     });
+    // Bloco com barra à esquerda: borda de parágrafo do Word (editável, segue
+    // o texto), texto onde estava, e o espaço em volta do bloco.
+    if (para.rule) {
+      const p = out[out.length - 1];
+      const { x, w, color, pad, style } = para.rule;
+      const [mt, pt, pb, mb] = para.gap ?? [0, 0, 0, 0];
+      p.indentLeft = Math.max(0, x + w + pad - region.x);
+      p.borderLeft = { w, color, style, space: pad, inner: [pt, pb] };
+      // Padding fica dentro da barra (espaço do parágrafo); margem fica fora:
+      // o Word junta itens seguidos de borda igual numa barra contínua — um
+      // espaçador sem borda entre eles separa, como no Studio.
+      p.spaceBefore = (p.spaceBefore ?? 0) + pt;
+      p.spaceAfter = (p.spaceAfter ?? 0) + pb;
+      // Margens vizinhas colapsam (vale a maior), como no navegador.
+      const outside = Math.max(mt, prevAfter);
+      if (out[out.length - 2]?.borderLeft) out.splice(out.length - 1, 0, spacer(Math.max(0.5, outside)));
+      else p.spaceBefore += outside;
+      prevAfter = mb;
+    } else if (prevAfter) {
+      out[out.length - 1].spaceBefore = (out[out.length - 1].spaceBefore ?? 0) + prevAfter;
+      prevAfter = 0;
+    }
   });
   if (out.length && !node.autonumber && !manualClause(node, out[0], ctx)) takeMarker(out[0], ctx);
   if (node.autonumber) {
@@ -2398,8 +2425,10 @@ const toParagraph = (p: PIR): Paragraph => {
     },
     numbering: p.numbering ? { reference: p.numbering.ref, level: p.numbering.level, ...(p.numbering.instance ? { instance: p.numbering.instance } : {}) } : undefined,
     border:
-      p.borderBottom || p.borderTop
+      p.borderBottom || p.borderTop || p.borderLeft
         ? {
+            // Vão até o texto em pontos (o Word vai até 31pt).
+            ...(p.borderLeft ? { left: { style: strokeStyle(p.borderLeft), size: Math.max(2, Math.round(p.borderLeft.w * 6)), color: p.borderLeft.color, space: Math.min(31, Math.round(p.borderLeft.space * 0.75)) } } : {}),
             ...(p.borderBottom ? { bottom: { style: strokeStyle(p.borderBottom), size: Math.max(2, Math.round(p.borderBottom.w * 6)), color: p.borderBottom.color, space: 0 } } : {}),
             ...(p.borderTop ? { top: { style: strokeStyle(p.borderTop), size: Math.max(2, Math.round(p.borderTop.w * 6)), color: p.borderTop.color, space: 0 } } : {}),
           }
@@ -2697,10 +2726,11 @@ const toTable = (t: TIR): Table => {
               items = items.filter((k, i) => !(k.kind === 'p' && k.spacer !== undefined && (i === 0 || i === items.length - 1) && !k.bookmark));
               // Só nas pontas da célula: o espaço entre uma tabela e o texto
               // de baixo (calendário → "Comunicação em até…") é conteúdo.
+              // Parágrafo com barra: o espaço dele é padding dentro da barra, fica.
               const first = items[0];
-              if (first?.kind === 'p') first.spaceBefore = 0;
+              if (first?.kind === 'p') first.spaceBefore = first.borderLeft?.inner[0] ?? 0;
               const last = items[items.length - 1];
-              if (last?.kind === 'p') last.spaceAfter = 0;
+              if (last?.kind === 'p') last.spaceAfter = last.borderLeft?.inner[1] ?? 0;
             }
             // Célula de linha fixa (capa, texto sobre arte): os vãos daqui também.
             const frozen = items.some((k) => k.kind === 'p' && k.frozen);
