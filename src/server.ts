@@ -15,6 +15,7 @@ import { renderDocumentPreview } from './preview.js';
 import { renderNativeDocx } from './docx-native/index.js';
 import { renderNativePptx } from './pptx-native/index.js';
 import { finalizePdfDownload } from './pdf-download.js';
+import { cancelDownload, isInternalCall, registerDownload } from './downloads.js';
 import { serviceClient } from './supabase.js';
 
 const app = Fastify({
@@ -53,7 +54,8 @@ app.setErrorHandler((err, req, reply) => {
 
 app.get('/health', async () => ({ ok: true, version: '0.1.0' }));
 
-type PdfBody = { documentId?: unknown };
+/** source: rótulo de quem pediu ('mcp'); só aparece no registro de downloads. */
+type PdfBody = { documentId?: unknown; source?: unknown };
 
 // Sanitiza só caracteres reservados de filesystem (preserva acentos, parênteses, etc).
 const cleanTitle = (raw: string | undefined): string => {
@@ -129,17 +131,29 @@ app.post<{ Body: PdfBody }>('/pdf', async (req, reply) => {
     apiKey: typeof apiKey === 'string' ? apiKey : undefined,
   });
 
-  // Abre a task de compressão em paralelo com o render — o start do ilovepdf
-  // custa ~800ms e não depende do PDF. Se falhar, o compress cria a dele.
-  const [{ buffer, title }, compressTask] = await Promise.all([
-    renderDocumentPdf({ documentId: authed.documentId, workspaceId: authed.workspaceId }),
-    startIlovepdfTask('compress').catch(() => undefined),
-  ]);
+  const downloadId = isInternalCall(req.headers['x-lex-internal'])
+    ? null
+    : await registerDownload(authed, 'pdf', req.body?.source);
 
-  const clean = cleanTitle(title);
-  const compressed = await compressOrOriginal(buffer, authed.documentId, clean, compressTask);
-  const delivered = await finalizePdfDownload(compressed, documentId);
+  let delivered: Buffer;
+  let clean: string;
+  try {
+    // Abre a task de compressão em paralelo com o render — o start do ilovepdf
+    // custa ~800ms e não depende do PDF. Se falhar, o compress cria a dele.
+    const [{ buffer, title }, compressTask] = await Promise.all([
+      renderDocumentPdf({ documentId: authed.documentId, workspaceId: authed.workspaceId }),
+      startIlovepdfTask('compress').catch(() => undefined),
+    ]);
 
+    clean = cleanTitle(title);
+    const compressed = await compressOrOriginal(buffer, authed.documentId, clean, compressTask);
+    delivered = await finalizePdfDownload(compressed, documentId);
+  } catch (err) {
+    await cancelDownload(downloadId); // arquivo que não saiu não conta
+    throw err;
+  }
+
+  if (downloadId) reply.header('X-Download-Id', downloadId);
   reply
     .code(200)
     .header('Content-Type', 'application/pdf')
@@ -204,6 +218,25 @@ const handleOfficeExport = async (
     apiKey: typeof apiKey === 'string' ? apiKey : undefined,
   });
 
+  const downloadId = isInternalCall(req.headers['x-lex-internal'])
+    ? null
+    : await registerDownload(authed, format, req.body?.source);
+  // Quem chama do servidor (MCP) usa o id para desfazer o registro se não
+  // conseguir entregar o arquivo adiante.
+  if (downloadId) reply.header('X-Download-Id', downloadId);
+  try {
+    await sendOfficeFile(format, authed, reply);
+  } catch (err) {
+    await cancelDownload(downloadId); // arquivo que não saiu não conta
+    throw err;
+  }
+};
+
+const sendOfficeFile = async (
+  format: OfficeFormat,
+  authed: import('./auth.js').AuthedRequest,
+  reply: import('fastify').FastifyReply,
+): Promise<void> => {
   // Word e PowerPoint nativos (padrão): montados do layout do Studio. Qualquer
   // falha cai na conversão do iLovePDF abaixo — o download nunca fica sem arquivo.
   if ((format === 'docx' ? config.docxEngine : config.pptxEngine) === 'native') {
