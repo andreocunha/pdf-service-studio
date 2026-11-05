@@ -39,6 +39,20 @@ reescrever meio editor. O Chromium usa o mesmo pipeline de renderização do
 navegador, então o PDF fica pixel-perfect. Links inline `<a href>` e botões
 de menu (SectionNav) viram links clicáveis dentro do PDF.
 
+## Limite e registro de downloads
+
+`/pdf`, `/docx` e `/pptx` são downloads: antes de gerar o arquivo, o serviço
+chama `fn_register_download` (SQL `205_document_downloads.sql` do app), que
+confere o limite do workspace (aba "Plano (Lex)") e grava quem baixou. Passou
+do limite → `402 download_limit_reached` com a mensagem pronta para a pessoa.
+Se a geração falhar, o registro é apagado. A resposta traz `X-Download-Id`:
+o MCP do Studio apaga esse registro se não conseguir publicar o link. Banco fora do ar não barra o
+download (só registra o erro no log).
+
+O corpo pode trazer `source: "mcp"` (só um rótulo no registro). Chamadas do
+próprio Studio que não são download (PDF para assinatura, PDF final do DLM)
+mandam `x-lex-internal: <PDF_SERVICE_SECRET>` e não contam nem registram.
+
 ## Deploy (Railway, plano Hobby)
 
 1. `railway init` dentro deste diretório (ou via dashboard apontando pro
