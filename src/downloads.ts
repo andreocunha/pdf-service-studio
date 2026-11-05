@@ -49,18 +49,23 @@ export const registerDownload = async (
   format: DownloadFormat,
   sourceLabel: unknown,
 ): Promise<string | null> => {
-  const { data, error } = await serviceClient().rpc('fn_register_download', {
-    p_document_id: authed.documentId,
-    p_format: format,
-    p_source: sourceOf(authed, sourceLabel),
-    p_user_id: authed.userId ?? null,
-    p_api_key_id: authed.apiKeyId ?? null,
-  });
-  if (error) {
-    logger.error({ documentId: authed.documentId, code: error.code, msg: error.message }, 'download register failed — allowing');
+  let result: { ok: boolean; id?: string; used?: number; limit?: number };
+  try {
+    // O supabase-js costuma devolver { error }, mas também pode lançar (rede,
+    // cliente mal configurado): as duas formas liberam o download.
+    const { data, error } = await serviceClient().rpc('fn_register_download', {
+      p_document_id: authed.documentId,
+      p_format: format,
+      p_source: sourceOf(authed, sourceLabel),
+      p_user_id: authed.userId ?? null,
+      p_api_key_id: authed.apiKeyId ?? null,
+    });
+    if (error) throw new Error(`${error.code ?? ''} ${error.message}`.trim());
+    result = data as typeof result;
+  } catch (err) {
+    logger.error({ documentId: authed.documentId, err }, 'download register failed — allowing');
     return null;
   }
-  const result = data as { ok: boolean; id?: string; used?: number; limit?: number };
   if (!result.ok) {
     logger.info({ documentId: authed.documentId, workspaceId: authed.workspaceId, used: result.used, limit: result.limit }, 'download limit reached');
     throw new HttpError(
@@ -74,6 +79,11 @@ export const registerDownload = async (
 
 export const cancelDownload = async (id: string | null): Promise<void> => {
   if (!id) return;
-  const { error } = await serviceClient().from('document_downloads').delete().eq('id', id);
-  if (error) logger.warn({ id, msg: error.message }, 'download cancel failed');
+  try {
+    const { error } = await serviceClient().from('document_downloads').delete().eq('id', id);
+    if (error) throw new Error(error.message);
+  } catch (err) {
+    // Nunca troca o erro original da geração pelo do cancelamento.
+    logger.warn({ id, err }, 'download cancel failed');
+  }
 };
