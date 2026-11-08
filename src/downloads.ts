@@ -9,7 +9,7 @@ import { serviceClient } from './supabase.js';
 // ---------------------------------------------------------------------------
 // Registro e teto de downloads (supabase/sql/205_document_downloads.sql)
 // ---------------------------------------------------------------------------
-// Todo /pdf, /docx e /pptx é um download — do editor, do MCP ou da API — e
+// Todo /pdf, /docx, /pptx e /html é um download — do editor, do MCP ou da API — e
 // passa pela fn_register_download ANTES de gerar o arquivo: ela confere o teto
 // do workspace e grava quem baixou. Se a geração falhar, a linha é apagada.
 //
@@ -18,7 +18,7 @@ import { serviceClient } from './supabase.js';
 // cabeçalho x-lex-internal = PDF_SERVICE_SECRET e não contam nem registram.
 // ---------------------------------------------------------------------------
 
-export type DownloadFormat = 'pdf' | 'docx' | 'pptx';
+export type DownloadFormat = 'pdf' | 'docx' | 'pptx' | 'html';
 type DownloadSource = 'editor' | 'mcp' | 'api';
 
 const sameSecret = (given: string): boolean => {
