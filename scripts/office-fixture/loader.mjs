@@ -21,6 +21,7 @@ export const withRenderPage = async (args, fn) => {
   }
 };
 export const renderDocumentPdf = async () => { throw Error('fixture: sem PDF'); };
+export const renderDocumentHtml = async () => { throw Error('fixture: sem HTML'); };
 `;
 export async function load(url, context, nextLoad) {
   if (url.endsWith('/dist/render.js')) return { format: 'module', source: RENDER, shortCircuit: true };
