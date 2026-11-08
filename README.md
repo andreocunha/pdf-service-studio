@@ -39,9 +39,17 @@ reescrever meio editor. O Chromium usa o mesmo pipeline de renderização do
 navegador, então o PDF fica pixel-perfect. Links inline `<a href>` e botões
 de menu (SectionNav) viram links clicáveis dentro do PDF.
 
+## HTML (`/html`)
+
+Usado pelo MCP do Studio, que não tem aba aberta. Não renderiza nada novo:
+abre a mesma `/render-pdf/[id]` e chama `window.__HTML_EXPORT`, que é o
+`buildDocumentHtml` do botão "HTML" do editor (`editor/export/exportHtml.ts`
+no app). O arquivo sai igual ao baixado no editor: um `.html` único com
+imagens e fontes embutidas e o menu de seções clicável.
+
 ## Limite e registro de downloads
 
-`/pdf`, `/docx` e `/pptx` são downloads: antes de gerar o arquivo, o serviço
+`/pdf`, `/docx`, `/pptx` e `/html` são downloads: antes de gerar o arquivo, o serviço
 chama `fn_register_download` (SQL `205_document_downloads.sql` do app), que
 confere o limite do workspace (aba "Plano (Lex)") e grava quem baixou. Passou
 do limite → `402 download_limit_reached` com a mensagem pronta para a pessoa.

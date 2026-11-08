@@ -10,7 +10,7 @@ import { compressPdf, convertPdfToOffice, startIlovepdfTask } from './ilovepdf.j
 import type { IlovepdfTask, OfficeFormat } from './ilovepdf.js';
 import { HttpError } from './errors.js';
 import { logger } from './logger.js';
-import { renderDocumentPdf } from './render.js';
+import { renderDocumentHtml, renderDocumentPdf } from './render.js';
 import { renderDocumentPreview } from './preview.js';
 import { renderNativeDocx } from './docx-native/index.js';
 import { renderNativePptx } from './pptx-native/index.js';
@@ -68,7 +68,7 @@ const cleanTitle = (raw: string | undefined): string => {
   );
 };
 
-const dispositionFor = (clean: string, ext: 'pdf' | 'docx' | 'pptx'): string => {
+const dispositionFor = (clean: string, ext: 'pdf' | 'docx' | 'pptx' | 'html'): string => {
   // ASCII fallback pra clientes que não entendem RFC 5987 (é raro hoje, mas seguro).
   const asciiFallback = clean.replace(/[^\x20-\x7E]/g, '_');
   const encodedUtf8 = encodeURIComponent(clean);
@@ -289,6 +289,52 @@ const sendOfficeFile = async (
 
 app.post<{ Body: PdfBody }>('/docx', (req, reply) => handleOfficeExport('docx', req, reply));
 app.post<{ Body: PdfBody }>('/pptx', (req, reply) => handleOfficeExport('pptx', req, reply));
+
+// ---------------------------------------------------------------------------
+// /html — arquivo .html autocontido (MCP do Studio)
+// ---------------------------------------------------------------------------
+// No editor o HTML nasce na própria aba (exportHtml.ts) e registra o download
+// por /api/downloads. Quem não tem aba aberta (MCP) cai aqui: mesma
+// autorização e mesmo registro/limite do /pdf.
+app.post<{ Body: PdfBody }>('/html', async (req, reply) => {
+  const { documentId } = req.body ?? {};
+  if (typeof documentId !== 'string' || documentId.length < 8) {
+    reply.code(400).send({ error: 'bad_request', message: 'documentId is required' });
+    return;
+  }
+  const authorization = req.headers['authorization'];
+  const apiKeyHeader = req.headers['x-api-key'];
+  const apiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
+
+  const authed = await authorize({
+    documentId,
+    authorization: typeof authorization === 'string' ? authorization : undefined,
+    apiKey: typeof apiKey === 'string' ? apiKey : undefined,
+  });
+
+  const downloadId = isInternalCall(req.headers['x-lex-internal'])
+    ? null
+    : await registerDownload(authed, 'html', req.body?.source);
+
+  let html: string;
+  let clean: string;
+  try {
+    const rendered = await renderDocumentHtml({ documentId: authed.documentId, workspaceId: authed.workspaceId });
+    html = rendered.html;
+    clean = cleanTitle(rendered.title);
+  } catch (err) {
+    await cancelDownload(downloadId); // arquivo que não saiu não conta
+    throw err;
+  }
+
+  if (downloadId) reply.header('X-Download-Id', downloadId);
+  reply
+    .code(200)
+    .header('Content-Type', 'text/html; charset=utf-8')
+    .header('Content-Disposition', dispositionFor(clean, 'html'))
+    .header('Cache-Control', 'no-store')
+    .send(html);
+});
 
 // ---------------------------------------------------------------------------
 // /preview — fotos das páginas + raio-x da paginação (MCP do Studio)

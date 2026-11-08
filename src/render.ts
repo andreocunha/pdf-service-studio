@@ -232,3 +232,35 @@ export const renderDocumentPdf = async (args: {
     };
   });
 };
+
+/**
+ * HTML autocontido (export do MCP). Não re-implementa nada: chama o mesmo
+ * buildDocumentHtml do botão "HTML" do editor, que a página de render expõe
+ * em `window.__HTML_EXPORT` — o arquivo sai idêntico ao baixado no editor.
+ */
+export const renderDocumentHtml = async (args: {
+  documentId: string;
+  workspaceId: string;
+}): Promise<{ html: string; title: string }> => {
+  const start = Date.now();
+  return withRenderPage(args, async ({ page, meta }) => {
+    const result = await page.evaluate(async () => {
+      const build = (window as unknown as {
+        __HTML_EXPORT?: () => Promise<{ html: string; failedAssets: number }>;
+      }).__HTML_EXPORT;
+      return build ? build() : null;
+    });
+    // Página de render anterior ao export HTML (deploy do app ainda não saiu).
+    if (!result) throw renderFailed('Esta versão do Studio ainda não exporta HTML por aqui.');
+    logger.info(
+      {
+        documentId: args.documentId,
+        elapsedMs: Date.now() - start,
+        htmlBytes: Buffer.byteLength(result.html),
+        failedAssets: result.failedAssets,
+      },
+      'HTML rendered',
+    );
+    return { html: result.html, title: meta.title ?? 'document' };
+  });
+};
